@@ -11,5 +11,7 @@ jobs:
       - name: List files in the repository
         run: |
           echo "Hello ${{ inputs.name }}" 
-          VAR=$(curl -s "https://search.maven.org/solrsearch/select?q=g:com.pvsstudio%20AND%20a:pvsstudio-maven-plugin&core=gav&rows=1&wt=json" | jq -r '.response.docs[0].v')
-          echo "VAR = $VAR" 
+          PVS_CORE_VER_LATEST=$(curl -s "https://search.maven.org/solrsearch/select?q=g:com.pvsstudio%20AND%20a:pvsstudio-maven-plugin&core=gav&rows=1&wt=json" | jq -r '.response.docs[0].v')
+          echo "PVS_CORE_VER_LATEST = $PVS_CORE_VER_LATEST"
+          PVS_CORE_VER_NOW=`wget -qO- https://api.github.com/repos/readonlyuser1/pvs/releases/latest | grep tag_name | cut -d '"' -f 4`
+          echo "PVS_CORE_VER_NOW = $PVS_CORE_VER_NOW"
