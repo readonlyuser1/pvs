@@ -1,14 +1,7 @@
 
 name: Manual workflow
 
-on:
-  workflow_dispatch:
-    inputs:
-      name:
-        description: 'Person to greet'
-        default: 'World'
-        required: true
-        type: string
+on: [push]
 
 jobs:
   greet:
