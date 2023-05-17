@@ -15,3 +15,26 @@ jobs:
           echo "PVS_CORE_VER_LATEST = $PVS_CORE_VER_LATEST"
           PVS_CORE_VER_NOW=`wget -qO- https://api.github.com/repos/readonlyuser1/pvs/releases/latest | grep tag_name | cut -d '"' -f 4`
           echo "PVS_CORE_VER_NOW = $PVS_CORE_VER_NOW"
+          
+          if [ "$PVS_CORE_VER_NOW" != "$PVS_CORE_VER_LATEST" ]; then
+            echo " found new PVS_CORE_VER = $PVS_CORE_VER_LATEST"
+            FILE_URL="https://files.pvs-studio.com/java/pvsstudio-cores/$PVS_CORE_VER_LATEST.zip"
+            echo "FILE_URL = $FILE_URL"
+            wget "$FILE_URL"
+            
+            RESPONSE=$(curl --header "Authorization: token $GITHUB_TOKEN" --header 'Content-Type: application/json' --data '{"tag_name": "'"$PVS_CORE_VER_LATEST"'","name":"Release '"$PVS_CORE_VER_LATEST"'","body":"Automatic release"}' --request POST https://api.github.com/repos/readonlyuser1/pvs/releases)
+            echo "RESPONSE = $RESPONSE"
+            RELEASE_ID=$(echo $RESPONSE | jq '.id')  
+            echo "RELEASE_ID = $RELEASE_ID"
+            
+            curl --header "Authorization: token $GITHUB_TOKEN" --header 'Content-Type: application/zip' --data-binary @"$PVS_CORE_VER_LATEST.zip" --request POST https://uploads.github.com/repos/readonlyuser1/pvs/releases/$RELEASE_ID/assets?name=$PVS_CORE_VER_LATEST
+            echo "New release created"
+          
+          
+          
+          
+          
+          
+          
+          
+          
