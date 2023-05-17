@@ -10,8 +10,6 @@ jobs:
     steps:
       - name: List files in the repository
         run: |
-          sudo apt update
-          sudo apt install curl -y
           echo "Hello ${{ inputs.name }}" 
           VAR=$(curl -s "https://search.maven.org/solrsearch/select?q=g:com.pvsstudio%20AND%20a:pvsstudio-maven-plugin&core=gav&rows=1&wt=json" | jq -r '.response.docs[0].v')
           echo "VAR = $VAR" 
