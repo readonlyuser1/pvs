@@ -1,0 +1,111 @@
+name: Update PVS Studio
+
+on:
+  schedule:
+    # Ежедневно: каждый день в 06:00 UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-pvs:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Run PVS Studio Updater
+        uses: ghcr.io/readonlyuser1/pvs-updater@latest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: readonlyuser1/pvs
+        id: update
+      
+      - name: Send Telegram Notification
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "⚠️ Telegram credentials not configured"
+            exit 0
+          fi
+          
+          STATUS="${{ steps.update.outputs.status }}"
+          VERSION="${{ steps.update.outputs.version }}"
+          
+          case "$STATUS" in
+            "success")
+              EMOJI="🎉"
+              TITLE="✅ PVS Studio Updated"
+              MESSAGE="${EMOJI} *${TITLE}*\n\n"
+              MESSAGE+="*Version:* \`${VERSION}\`\n"
+              MESSAGE+="*Status:* ✅ SUCCESS\n"
+              MESSAGE+="*Time:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')\n\n"
+              MESSAGE+="🔗 [View Release](https://github.com/readonlyuser1/pvs/releases/tag/${VERSION})"
+              ;;
+              
+            "skipped")
+              EMOJI="ℹ️"
+              TITLE="No New Version"
+              MESSAGE="${EMOJI} *${TITLE}*\n\n"
+              MESSAGE+="*Version:* \`${VERSION}\`\n"
+              MESSAGE+="*Status:* ⏭️ SKIPPED\n"
+              MESSAGE+="*Reason:* Already exists\n"
+              MESSAGE+="*Time:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+              ;;
+              
+            *)
+              EMOJI="💥"
+              TITLE="❌ Update Failed"
+              MESSAGE="${EMOJI} *${TITLE}*\n\n"
+              MESSAGE+="*Version:* \`${VERSION:-N/A}\`\n"
+              MESSAGE+="*Status:* ❌ ERROR\n"
+              MESSAGE+="*Time:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')\n\n"
+              MESSAGE+="🔗 [Check Logs](https://github.com/readonlyuser1/pvs/actions/runs/${{ github.run_id }})"
+              ;;
+          esac
+          
+          MESSAGE_JSON=$(echo "$MESSAGE" | jq -sR .)
+          
+          curl -s -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"chat_id\": \"${TELEGRAM_CHAT_ID}\",
+              \"text\": ${MESSAGE_JSON},
+              \"parse_mode\": \"Markdown\",
+              \"disable_web_page_preview\": true
+            }" > /dev/null 2>&1 || true
+      
+      - name: Summary
+        if: always()
+        run: |
+          STATUS="${{ steps.update.outputs.status }}"
+          VERSION="${{ steps.update.outputs.version }}"
+          
+          echo "## 📦 PVS Studio Update" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          case "$STATUS" in
+            "success")
+              echo "**Status:** ✅ Success" >> $GITHUB_STEP_SUMMARY
+              echo "**Version:** ${VERSION}" >> $GITHUB_STEP_SUMMARY
+              echo "**Release:** https://github.com/readonlyuser1/pvs/releases/tag/${VERSION}" >> $GITHUB_STEP_SUMMARY
+              ;;
+            "skipped")
+              echo "**Status:** ⏭️ Skipped" >> $GITHUB_STEP_SUMMARY
+              echo "**Version:** ${VERSION} (already exists)" >> $GITHUB_STEP_SUMMARY
+              ;;
+            *)
+              echo "**Status:** ❌ Failed" >> $GITHUB_STEP_SUMMARY
+              echo "**Version:** ${VERSION:-N/A}" >> $GITHUB_STEP_SUMMARY
+              ;;
+          esac
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Time:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
