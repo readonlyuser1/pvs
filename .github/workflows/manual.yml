@@ -15,30 +15,37 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install curl jq wget -y
+          sudo apt install curl jq wget xmlstarlet -y
+          
+      - name: Get latest version from Maven metadata
+        id: get_version
+        run: |
+          echo "=== Getting latest version from Maven metadata ==="
+          
+          # Получаем все версии из metadata.xml
+          VERSIONS=$(curl -s "https://repo1.maven.org/maven2/com/pvsstudio/pvsstudio-maven-plugin/maven-metadata.xml" | \
+            xmlstarlet sel -t -v "//version" || \
+            grep -oP '(?<=<version>)[^<]+' | sort -V)
+          
+          # Берем последнюю версию
+          PVS_CORE_VER_LATEST=$(echo "$VERSIONS" | sort -V | tail -1)
+          echo "Latest version from Maven: $PVS_CORE_VER_LATEST"
+          
+          # Сохраняем в файл для использования в других шагах
+          echo "PVS_CORE_VER_LATEST=$PVS_CORE_VER_LATEST" >> $GITHUB_ENV
+          echo "Latest version: $PVS_CORE_VER_LATEST"
           
       - name: Check and create release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "=== Getting latest PVS version from Maven (sorted by timestamp) ==="
-          
-          # Получаем последнюю версию по timestamp
-          MAVEN_RESPONSE=$(curl -s "https://search.maven.org/solrsearch/select?q=g:com.pvsstudio%20AND%20a:pvsstudio-maven-plugin&core=gav&rows=1&wt=json&sort=timestamp%20desc")
-          echo "Maven response: $MAVEN_RESPONSE"
-          
-          PVS_CORE_VER_LATEST=$(echo "$MAVEN_RESPONSE" | jq -r '.response.docs[0].v')
-          echo "PVS_CORE_VER_LATEST = $PVS_CORE_VER_LATEST"
-          
-          if [ -z "$PVS_CORE_VER_LATEST" ] || [ "$PVS_CORE_VER_LATEST" = "null" ]; then
-            echo "ERROR: Could not get version from Maven"
-            exit 1
-          fi
+          PVS_CORE_VER_LATEST="${{ env.PVS_CORE_VER_LATEST }}"
+          echo "Working with version: $PVS_CORE_VER_LATEST"
           
           echo "=== Getting current release from GitHub ==="
           GITHUB_RESPONSE=$(curl -s https://api.github.com/repos/readonlyuser1/pvs/releases/latest)
           PVS_CORE_VER_NOW=$(echo "$GITHUB_RESPONSE" | jq -r '.tag_name')
-          echo "PVS_CORE_VER_NOW = $PVS_CORE_VER_NOW"
+          echo "Current GitHub release: $PVS_CORE_VER_NOW"
           
           if [ -z "$PVS_CORE_VER_NOW" ] || [ "$PVS_CORE_VER_NOW" = "null" ]; then
             echo "No releases found yet, will create first release"
@@ -50,19 +57,27 @@ jobs:
           echo "Current GitHub: $PVS_CORE_VER_NOW"
           
           if [ "$PVS_CORE_VER_NOW" != "$PVS_CORE_VER_LATEST" ]; then
-            echo "=== Downloading file for version $PVS_CORE_VER_LATEST ==="
-            
+            echo "=== Downloading file ==="
             FILE_URL="https://files.pvs-studio.com/java/pvsstudio-cores/$PVS_CORE_VER_LATEST.zip"
-            echo "Downloading from: $FILE_URL"
+            echo "URL: $FILE_URL"
             
-            # Пробуем скачать файл
+            # Пробуем скачать
             if wget --timeout=30 --tries=3 "$FILE_URL"; then
               echo "Download successful"
               ls -lh "$PVS_CORE_VER_LATEST.zip"
             else
-              echo "WARNING: File not found at $FILE_URL"
-              echo "Will try to create release without file (or check if file exists)"
-              exit 1
+              echo "WARNING: Could not download zip file from $FILE_URL"
+              echo "Will try to use Maven artifact instead"
+              
+              # Альтернатива: скачиваем jar из Maven
+              wget "https://repo1.maven.org/maven2/com/pvsstudio/pvsstudio-maven-plugin/$PVS_CORE_VER_LATEST/pvsstudio-maven-plugin-$PVS_CORE_VER_LATEST.jar"
+              if [ -f "pvsstudio-maven-plugin-$PVS_CORE_VER_LATEST.jar" ]; then
+                echo "Downloaded jar file successfully"
+                mv "pvsstudio-maven-plugin-$PVS_CORE_VER_LATEST.jar" "$PVS_CORE_VER_LATEST.zip"
+              else
+                echo "ERROR: Could not download from any source"
+                exit 1
+              fi
             fi
             
             echo "=== Creating release ==="
@@ -75,7 +90,7 @@ jobs:
               -d '{
                 "tag_name": "'"$PVS_CORE_VER_LATEST"'",
                 "name": "Release '"$PVS_CORE_VER_LATEST"'",
-                "body": "Automatic release from Maven Central\n\nVersion: '"$PVS_CORE_VER_LATEST"'\nDate: '"$(date)"'",
+                "body": "Automatic release from Maven Central\n\nVersion: '"$PVS_CORE_VER_LATEST"'\nSource: Maven Central\nDate: '"$(date -u +'%Y-%m-%d %H:%M:%S UTC')"'",
                 "draft": false,
                 "prerelease": false
               }')
