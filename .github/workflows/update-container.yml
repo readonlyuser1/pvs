@@ -26,7 +26,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.AAA }}
+          password: ${{ secrets.PVS_UPDATE_DOCKER_CONTAINER_WRITE_PERSONAL }}
       
       - name: Get current date
         id: date
