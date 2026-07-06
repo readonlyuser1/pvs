@@ -1,4 +1,4 @@
-name: Manual workflow
+name: PVS Studio Release
 
 on:
   push:
@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
         
       - name: Install dependencies
@@ -30,60 +30,238 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # ... (весь код из предыдущей версии) ...
+          set -e
           
-          # Сохраняем результат для уведомления
-          echo "release_version=$LATEST" >> $GITHUB_OUTPUT
-          echo "release_url=https://github.com/$REPO/releases/tag/$LATEST" >> $GITHUB_OUTPUT
+          # ============================================
+          # ФУНКЦИИ ДЛЯ ОБРАБОТКИ ОШИБОК
+          # ============================================
+          
+          error_exit() {
+            echo "❌ ERROR: $1"
+            echo "status=error" >> $GITHUB_OUTPUT
+            echo "error_message=$1" >> $GITHUB_OUTPUT
+            exit 1
+          }
+          
+          log() {
+            echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1"
+          }
+          
+          # ============================================
+          # ШАГ 1: ПОЛУЧЕНИЕ ПОСЛЕДНЕЙ ВЕРСИИ ИЗ MAVEN
+          # ============================================
+          
+          log "📦 Getting latest version from Maven..."
+          
+          # Получаем все версии из metadata
+          VERSIONS=$(curl -s -f "$MAVEN_URL" | \
+            xmlstarlet sel -t -v "//version" 2>/dev/null || \
+            grep -oP '(?<=<version>)[^<]+' | sort -V)
+          
+          if [ -z "$VERSIONS" ]; then
+            error_exit "Could not extract versions from Maven metadata"
+          fi
+          
+          # Берем последнюю версию
+          PVS_CORE_VER_LATEST=$(echo "$VERSIONS" | sort -V | tail -1)
+          log "Latest Maven version: $PVS_CORE_VER_LATEST"
+          
+          # Валидация формата версии
+          if ! echo "$PVS_CORE_VER_LATEST" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            error_exit "Invalid version format: $PVS_CORE_VER_LATEST"
+          fi
+          
+          # ============================================
+          # ШАГ 2: ПРОВЕРКА ТЕКУЩЕГО РЕЛИЗА НА GITHUB
+          # ============================================
+          
+          log "📦 Getting current release from GitHub..."
+          
+          GITHUB_RESPONSE=$(curl -s -f "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null || echo '{"tag_name":"null"}')
+          PVS_CORE_VER_NOW=$(echo "$GITHUB_RESPONSE" | jq -r '.tag_name')
+          
+          if [ -z "$PVS_CORE_VER_NOW" ] || [ "$PVS_CORE_VER_NOW" = "null" ]; then
+            log "No releases found yet, will create first release"
+            PVS_CORE_VER_NOW="none"
+          fi
+          
+          log "Current GitHub release: $PVS_CORE_VER_NOW"
+          
+          # ============================================
+          # ШАГ 3: СРАВНЕНИЕ ВЕРСИЙ
+          # ============================================
+          
+          if [ "$PVS_CORE_VER_NOW" = "$PVS_CORE_VER_LATEST" ]; then
+            log "✅ Version $PVS_CORE_VER_LATEST already exists, skipping"
+            echo "status=skipped" >> $GITHUB_OUTPUT
+            echo "version=$PVS_CORE_VER_LATEST" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          log "⬆️ New version detected: $PVS_CORE_VER_LATEST (current: $PVS_CORE_VER_NOW)"
+          
+          # ============================================
+          # ШАГ 4: СКАЧИВАНИЕ ФАЙЛА
+          # ============================================
+          
+          log "📥 Downloading $PVS_CORE_VER_LATEST..."
+          
+          FILE_URL="$DOWNLOAD_BASE/$PVS_CORE_VER_LATEST.zip"
+          log "URL: $FILE_URL"
+          
+          # Проверяем существование файла
+          if ! curl -s -f -I "$FILE_URL" > /dev/null 2>&1; then
+            error_exit "File not found at $FILE_URL"
+          fi
+          
+          # Скачиваем с повторными попытками
+          if ! wget --timeout=30 --tries=3 "$FILE_URL"; then
+            error_exit "Failed to download file"
+          fi
+          
+          # Проверяем скачанный файл
+          if [ ! -f "$PVS_CORE_VER_LATEST.zip" ]; then
+            error_exit "Downloaded file not found"
+          fi
+          
+          if [ ! -s "$PVS_CORE_VER_LATEST.zip" ]; then
+            error_exit "Downloaded file is empty"
+          fi
+          
+          # Получаем размер файла
+          FILE_SIZE=$(stat -c%s "$PVS_CORE_VER_LATEST.zip" 2>/dev/null || stat -f%z "$PVS_CORE_VER_LATEST.zip" 2>/dev/null)
+          FILE_SIZE_HUMAN=$(numfmt --to=iec $FILE_SIZE 2>/dev/null || echo "$FILE_SIZE bytes")
+          log "File size: $FILE_SIZE_HUMAN"
+          
+          # ============================================
+          # ШАГ 5: СОЗДАНИЕ РЕЛИЗА
+          # ============================================
+          
+          log "📤 Creating release..."
+          
+          RELEASE_DATA=$(cat <<EOF
+          {
+            "tag_name": "$PVS_CORE_VER_LATEST",
+            "name": "Release $PVS_CORE_VER_LATEST",
+            "body": "## Automated Release from Maven Central\n\n- **Version:** $PVS_CORE_VER_LATEST\n- **Source:** Maven Central\n- **Date:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')\n- **Size:** $FILE_SIZE_HUMAN",
+            "draft": false,
+            "prerelease": false
+          }
+          EOF
+          )
+          
+          RESPONSE=$(curl -s -f -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$REPO/releases" \
+            -d "$RELEASE_DATA") || error_exit "Failed to create release"
+          
+          # Проверяем ответ
+          if echo "$RESPONSE" | jq -e '.message' > /dev/null 2>&1; then
+            ERROR_MSG=$(echo "$RESPONSE" | jq -r '.message')
+            error_exit "GitHub API error: $ERROR_MSG"
+          fi
+          
+          RELEASE_ID=$(echo "$RESPONSE" | jq -r '.id')
+          if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
+            error_exit "Failed to get release ID"
+          fi
+          
+          log "Release ID: $RELEASE_ID"
+          
+          # ============================================
+          # ШАГ 6: ЗАГРУЗКА АССЕТА
+          # ============================================
+          
+          log "⬆️ Uploading asset..."
+          
+          UPLOAD_RESPONSE=$(curl -s -f -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/zip" \
+            "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=$PVS_CORE_VER_LATEST.zip" \
+            --data-binary @"$PVS_CORE_VER_LATEST.zip") || error_exit "Failed to upload asset"
+          
+          # Проверяем загрузку
+          if echo "$UPLOAD_RESPONSE" | jq -e '.message' > /dev/null 2>&1; then
+            ERROR_MSG=$(echo "$UPLOAD_RESPONSE" | jq -r '.message')
+            error_exit "Upload error: $ERROR_MSG"
+          fi
+          
+          UPLOAD_ID=$(echo "$UPLOAD_RESPONSE" | jq -r '.id')
+          if [ -z "$UPLOAD_ID" ] || [ "$UPLOAD_ID" = "null" ]; then
+            error_exit "Failed to get upload ID"
+          fi
+          
+          # ============================================
+          # ШАГ 7: СОХРАНЕНИЕ РЕЗУЛЬТАТОВ
+          # ============================================
+          
+          RELEASE_URL="https://github.com/$REPO/releases/tag/$PVS_CORE_VER_LATEST"
+          
+          echo "status=success" >> $GITHUB_OUTPUT
+          echo "version=$PVS_CORE_VER_LATEST" >> $GITHUB_OUTPUT
+          echo "release_url=$RELEASE_URL" >> $GITHUB_OUTPUT
           echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
-          echo "asset_size=$(numfmt --to=iec $FILE_SIZE 2>/dev/null || echo $FILE_SIZE bytes)" >> $GITHUB_OUTPUT
+          echo "asset_id=$UPLOAD_ID" >> $GITHUB_OUTPUT
+          echo "file_size=$FILE_SIZE_HUMAN" >> $GITHUB_OUTPUT
           
+          log "✅ Release created successfully!"
+          log "🔗 $RELEASE_URL"
+          
+          # Очистка
+          rm -f "$PVS_CORE_VER_LATEST.zip" 2>/dev/null
+
       - name: Send Telegram Notification
-        if: always() && (success() || failure())
+        if: always() && (success() || failure()) && steps.release.outputs.status != 'skipped'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          # ============================================
-          # SECURE TELEGRAM NOTIFICATION
-          # ============================================
-          
           # Проверка наличия секретов
           if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
             echo "⚠️ Telegram credentials not configured, skipping notification"
             exit 0
           fi
           
-          # Безопасная проверка токена (не выводим в логи)
           echo "📨 Sending Telegram notification..."
           
           # Определяем статус
-          if [ "${{ job.status }}" = "success" ]; then
-            STATUS="✅ SUCCESS"
+          STATUS="${{ steps.release.outputs.status }}"
+          
+          if [ "$STATUS" = "success" ]; then
             EMOJI="🎉"
-            COLOR="good"
-          else
-            STATUS="❌ FAILED"
-            EMOJI="💥"
-            COLOR="danger"
-          fi
+            STATUS_TEXT="✅ SUCCESS"
+            MESSAGE=$(cat <<EOF
+          ${EMOJI} *Новый релиз PVS Studio!*
           
-          # Формируем сообщение
-          MESSAGE=$(cat <<EOF
-          ${EMOJI} *PVS Studio Release ${STATUS}*
+          *Версия:* \`${{ steps.release.outputs.version }}\`
+          *Статус:* ${STATUS_TEXT}
+          *Размер:* ${{ steps.release.outputs.file_size }}
+          *Время:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')
           
-          *Repository:* ${REPO}
-          *Version:* ${{ steps.release.outputs.release_version || 'N/A' }}
-          *Status:* ${STATUS}
-          *Time:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')
-          *Workflow:* https://github.com/${REPO}/actions/runs/${{ github.run_id }}
-          
-          $([ "${{ job.status }}" = "success" ] && echo "*Release:* ${{ steps.release.outputs.release_url || 'N/A' }}")
-          $([ "${{ job.status }}" = "success" ] && echo "*Size:* ${{ steps.release.outputs.asset_size || 'N/A' }}")
-          
-          $([ "${{ job.status }}" != "success" ] && echo "⚠️ *Check logs for details:* https://github.com/${REPO}/actions/runs/${{ github.run_id }}")
+          🔗 [Скачать релиз](${{ steps.release.outputs.release_url }})
+          📊 [Workflow логи](https://github.com/${{ env.REPO }}/actions/runs/${{ github.run_id }})
           EOF
           )
+          else
+            EMOJI="💥"
+            STATUS_TEXT="❌ FAILED"
+            MESSAGE=$(cat <<EOF
+          ${EMOJI} *Ошибка создания релиза!*
+          
+          *Версия:* \`${{ steps.release.outputs.version || 'N/A' }}\`
+          *Статус:* ${STATUS_TEXT}
+          *Ошибка:* ${{ steps.release.outputs.error_message || 'Неизвестная ошибка' }}
+          *Время:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+          
+          🔗 [Смотреть логи](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          ⚠️ *Требуется вмешательство!*
+          EOF
+          )
+          fi
           
           # Экранирование для JSON
           MESSAGE_JSON=$(echo "$MESSAGE" | jq -sR .)
@@ -106,7 +284,7 @@ jobs:
           # Проверка ответа
           if echo "$RESPONSE" | jq -e '.ok' > /dev/null 2>&1; then
             if [ "$(echo "$RESPONSE" | jq -r '.ok')" = "true" ]; then
-              echo "✅ Telegram notification sent successfully"
+              echo "✅ Telegram notification sent successfully!"
             else
               ERROR_MSG=$(echo "$RESPONSE" | jq -r '.description // "Unknown error"')
               echo "⚠️ Telegram API error: $ERROR_MSG"
@@ -115,47 +293,31 @@ jobs:
             echo "⚠️ Failed to parse Telegram response"
           fi
 
-      - name: Send Error Notification (detailed)
-        if: failure()
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - name: Summary
+        if: always()
         run: |
-          # Отправка детальной ошибки
-          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
-            exit 0
+          STATUS="${{ steps.release.outputs.status }}"
+          
+          if [ "$STATUS" = "success" ]; then
+            echo "## ✅ Release Created Successfully" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Version:** ${{ steps.release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+            echo "**Release:** ${{ steps.release.outputs.release_url }}" >> $GITHUB_STEP_SUMMARY
+            echo "**Size:** ${{ steps.release.outputs.file_size }}" >> $GITHUB_STEP_SUMMARY
+          elif [ "$STATUS" = "skipped" ]; then
+            echo "## ⏭️ Release Skipped" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Version ${{ steps.release.outputs.version }} already exists" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ❌ Release Failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Error:** ${{ steps.release.outputs.error_message || 'Unknown error' }}" >> $GITHUB_STEP_SUMMARY
+            echo "**Logs:** https://github.com/${{ env.REPO }}/actions/runs/${{ github.run_id }}" >> $GITHUB_STEP_SUMMARY
           fi
           
-          ERROR_MESSAGE=$(cat <<EOF
-          🚨 *PVS Studio Release CRITICAL ERROR*
-          
-          *Repository:* ${REPO}
-          *Workflow:* https://github.com/${REPO}/actions/runs/${{ github.run_id }}
-          *Job:* ${{ github.job }}
-          *Error:* Check workflow logs for details
-          
-          ⚠️ *Action required!* Please investigate the failure.
-          EOF
-          )
-          
-          ERROR_JSON=$(echo "$ERROR_MESSAGE" | jq -sR .)
-          
-          curl -s -X POST \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"chat_id\": \"${TELEGRAM_CHAT_ID}\",
-              \"text\": ${ERROR_JSON},
-              \"parse_mode\": \"Markdown\"
-            }" > /dev/null 2>&1 || true
-
-      - name: Summary
-        if: success()
-        run: |
-          echo "## ✅ Release Created Successfully" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Version:** ${{ steps.release.outputs.release_version }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Release:** ${{ steps.release.outputs.release_url }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Size:** ${{ steps.release.outputs.asset_size }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "📨 Telegram notification: ${{ secrets.TELEGRAM_CHAT_ID && '✅ Sent' || '⚠️ Not configured' }}" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
+            echo "📨 **Telegram:** ✅ Notification sent" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "📨 **Telegram:** ⚠️ Not configured" >> $GITHUB_STEP_SUMMARY
+          fi
