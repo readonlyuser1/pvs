@@ -33,7 +33,7 @@ jobs:
           set -e
           
           # ============================================
-          # ФУНКЦИИ ДЛЯ ОБРАБОТКИ ОШИБОК
+          # ФУНКЦИИ
           # ============================================
           
           error_exit() {
@@ -48,12 +48,11 @@ jobs:
           }
           
           # ============================================
-          # ШАГ 1: ПОЛУЧЕНИЕ ПОСЛЕДНЕЙ ВЕРСИИ ИЗ MAVEN
+          # ШАГ 1: ПОЛУЧЕНИЕ ВЕРСИИ
           # ============================================
           
           log "📦 Getting latest version from Maven..."
           
-          # Получаем все версии из metadata
           VERSIONS=$(curl -s -f "$MAVEN_URL" | \
             xmlstarlet sel -t -v "//version" 2>/dev/null || \
             grep -oP '(?<=<version>)[^<]+' | sort -V)
@@ -62,17 +61,15 @@ jobs:
             error_exit "Could not extract versions from Maven metadata"
           fi
           
-          # Берем последнюю версию
           PVS_CORE_VER_LATEST=$(echo "$VERSIONS" | sort -V | tail -1)
           log "Latest Maven version: $PVS_CORE_VER_LATEST"
           
-          # Валидация формата версии
           if ! echo "$PVS_CORE_VER_LATEST" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             error_exit "Invalid version format: $PVS_CORE_VER_LATEST"
           fi
           
           # ============================================
-          # ШАГ 2: ПРОВЕРКА ТЕКУЩЕГО РЕЛИЗА НА GITHUB
+          # ШАГ 2: ПРОВЕРКА ТЕКУЩЕГО РЕЛИЗА
           # ============================================
           
           log "📦 Getting current release from GitHub..."
@@ -91,10 +88,14 @@ jobs:
           # ШАГ 3: СРАВНЕНИЕ ВЕРСИЙ
           # ============================================
           
+          # Сохраняем версию для уведомлений
+          echo "version=$PVS_CORE_VER_LATEST" >> $GITHUB_OUTPUT
+          echo "current_version=$PVS_CORE_VER_NOW" >> $GITHUB_OUTPUT
+          
           if [ "$PVS_CORE_VER_NOW" = "$PVS_CORE_VER_LATEST" ]; then
             log "✅ Version $PVS_CORE_VER_LATEST already exists, skipping"
             echo "status=skipped" >> $GITHUB_OUTPUT
-            echo "version=$PVS_CORE_VER_LATEST" >> $GITHUB_OUTPUT
+            echo "skip_reason=Version $PVS_CORE_VER_LATEST already exists" >> $GITHUB_OUTPUT
             exit 0
           fi
           
@@ -109,17 +110,14 @@ jobs:
           FILE_URL="$DOWNLOAD_BASE/$PVS_CORE_VER_LATEST.zip"
           log "URL: $FILE_URL"
           
-          # Проверяем существование файла
           if ! curl -s -f -I "$FILE_URL" > /dev/null 2>&1; then
             error_exit "File not found at $FILE_URL"
           fi
           
-          # Скачиваем с повторными попытками
           if ! wget --timeout=30 --tries=3 "$FILE_URL"; then
             error_exit "Failed to download file"
           fi
           
-          # Проверяем скачанный файл
           if [ ! -f "$PVS_CORE_VER_LATEST.zip" ]; then
             error_exit "Downloaded file not found"
           fi
@@ -128,7 +126,6 @@ jobs:
             error_exit "Downloaded file is empty"
           fi
           
-          # Получаем размер файла
           FILE_SIZE=$(stat -c%s "$PVS_CORE_VER_LATEST.zip" 2>/dev/null || stat -f%z "$PVS_CORE_VER_LATEST.zip" 2>/dev/null)
           FILE_SIZE_HUMAN=$(numfmt --to=iec $FILE_SIZE 2>/dev/null || echo "$FILE_SIZE bytes")
           log "File size: $FILE_SIZE_HUMAN"
@@ -157,7 +154,6 @@ jobs:
             "https://api.github.com/repos/$REPO/releases" \
             -d "$RELEASE_DATA") || error_exit "Failed to create release"
           
-          # Проверяем ответ
           if echo "$RESPONSE" | jq -e '.message' > /dev/null 2>&1; then
             ERROR_MSG=$(echo "$RESPONSE" | jq -r '.message')
             error_exit "GitHub API error: $ERROR_MSG"
@@ -184,7 +180,6 @@ jobs:
             "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=$PVS_CORE_VER_LATEST.zip" \
             --data-binary @"$PVS_CORE_VER_LATEST.zip") || error_exit "Failed to upload asset"
           
-          # Проверяем загрузку
           if echo "$UPLOAD_RESPONSE" | jq -e '.message' > /dev/null 2>&1; then
             ERROR_MSG=$(echo "$UPLOAD_RESPONSE" | jq -r '.message')
             error_exit "Upload error: $ERROR_MSG"
@@ -202,7 +197,6 @@ jobs:
           RELEASE_URL="https://github.com/$REPO/releases/tag/$PVS_CORE_VER_LATEST"
           
           echo "status=success" >> $GITHUB_OUTPUT
-          echo "version=$PVS_CORE_VER_LATEST" >> $GITHUB_OUTPUT
           echo "release_url=$RELEASE_URL" >> $GITHUB_OUTPUT
           echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
           echo "asset_id=$UPLOAD_ID" >> $GITHUB_OUTPUT
@@ -211,11 +205,14 @@ jobs:
           log "✅ Release created successfully!"
           log "🔗 $RELEASE_URL"
           
-          # Очистка
           rm -f "$PVS_CORE_VER_LATEST.zip" 2>/dev/null
 
+      # ============================================
+      # УВЕДОМЛЕНИЕ В TELEGRAM (ДЛЯ ВСЕХ СТАТУСОВ)
+      # ============================================
+      
       - name: Send Telegram Notification
-        if: always() && (success() || failure()) && steps.release.outputs.status != 'skipped'
+        if: always()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -230,15 +227,19 @@ jobs:
           
           # Определяем статус
           STATUS="${{ steps.release.outputs.status }}"
+          VERSION="${{ steps.release.outputs.version }}"
+          CURRENT_VERSION="${{ steps.release.outputs.current_version }}"
           
-          if [ "$STATUS" = "success" ]; then
-            EMOJI="🎉"
-            STATUS_TEXT="✅ SUCCESS"
-            MESSAGE=$(cat <<EOF
-          ${EMOJI} *Новый релиз PVS Studio!*
+          # Формируем сообщение в зависимости от статуса
+          case "$STATUS" in
+            "success")
+              EMOJI="🎉"
+              TITLE="✅ Новый релиз создан!"
+              MESSAGE=$(cat <<EOF
+          ${EMOJI} *${TITLE}*
           
-          *Версия:* \`${{ steps.release.outputs.version }}\`
-          *Статус:* ${STATUS_TEXT}
+          *Версия:* \`${VERSION}\`
+          *Статус:* ✅ УСПЕШНО
           *Размер:* ${{ steps.release.outputs.file_size }}
           *Время:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')
           
@@ -246,22 +247,46 @@ jobs:
           📊 [Workflow логи](https://github.com/${{ env.REPO }}/actions/runs/${{ github.run_id }})
           EOF
           )
-          else
-            EMOJI="💥"
-            STATUS_TEXT="❌ FAILED"
-            MESSAGE=$(cat <<EOF
-          ${EMOJI} *Ошибка создания релиза!*
+              ;;
+              
+            "skipped")
+              EMOJI="ℹ️"
+              TITLE="Релиз уже существует"
+              MESSAGE=$(cat <<EOF
+          ${EMOJI} *${TITLE}*
           
-          *Версия:* \`${{ steps.release.outputs.version || 'N/A' }}\`
-          *Статус:* ${STATUS_TEXT}
-          *Ошибка:* ${{ steps.release.outputs.error_message || 'Неизвестная ошибка' }}
+          *Версия:* \`${VERSION}\`
+          *Статус:* ⏭️ ПРОПУЩЕН
+          *Причина:* Версия уже существует
+          *Текущий релиз:* \`${CURRENT_VERSION}\`
+          *Время:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+          
+          🔗 [Посмотреть релиз](https://github.com/${{ env.REPO }}/releases/tag/${VERSION})
+          📊 [Workflow логи](https://github.com/${{ env.REPO }}/actions/runs/${{ github.run_id }})
+          EOF
+          )
+              ;;
+              
+            "error"|"")
+              EMOJI="💥"
+              TITLE="❌ Ошибка создания релиза!"
+              ERROR_MSG="${{ steps.release.outputs.error_message }}"
+              [ -z "$ERROR_MSG" ] && ERROR_MSG="Неизвестная ошибка (проверьте логи)"
+              
+              MESSAGE=$(cat <<EOF
+          ${EMOJI} *${TITLE}*
+          
+          *Версия:* \`${VERSION:-N/A}\`
+          *Статус:* ❌ ОШИБКА
+          *Ошибка:* ${ERROR_MSG}
           *Время:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')
           
           🔗 [Смотреть логи](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
           ⚠️ *Требуется вмешательство!*
           EOF
           )
-          fi
+              ;;
+          esac
           
           # Экранирование для JSON
           MESSAGE_JSON=$(echo "$MESSAGE" | jq -sR .)
@@ -297,23 +322,33 @@ jobs:
         if: always()
         run: |
           STATUS="${{ steps.release.outputs.status }}"
+          VERSION="${{ steps.release.outputs.version }}"
           
-          if [ "$STATUS" = "success" ]; then
-            echo "## ✅ Release Created Successfully" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Version:** ${{ steps.release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-            echo "**Release:** ${{ steps.release.outputs.release_url }}" >> $GITHUB_STEP_SUMMARY
-            echo "**Size:** ${{ steps.release.outputs.file_size }}" >> $GITHUB_STEP_SUMMARY
-          elif [ "$STATUS" = "skipped" ]; then
-            echo "## ⏭️ Release Skipped" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Version ${{ steps.release.outputs.version }} already exists" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "## ❌ Release Failed" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Error:** ${{ steps.release.outputs.error_message || 'Unknown error' }}" >> $GITHUB_STEP_SUMMARY
-            echo "**Logs:** https://github.com/${{ env.REPO }}/actions/runs/${{ github.run_id }}" >> $GITHUB_STEP_SUMMARY
-          fi
+          case "$STATUS" in
+            "success")
+              echo "## ✅ Release Created Successfully" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**Version:** ${VERSION}" >> $GITHUB_STEP_SUMMARY
+              echo "**Release:** ${{ steps.release.outputs.release_url }}" >> $GITHUB_STEP_SUMMARY
+              echo "**Size:** ${{ steps.release.outputs.file_size }}" >> $GITHUB_STEP_SUMMARY
+              ;;
+              
+            "skipped")
+              echo "## ⏭️ Release Skipped" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**Version:** ${VERSION}" >> $GITHUB_STEP_SUMMARY
+              echo "**Reason:** Version already exists" >> $GITHUB_STEP_SUMMARY
+              echo "**Current:** ${{ steps.release.outputs.current_version }}" >> $GITHUB_STEP_SUMMARY
+              ;;
+              
+            "error"|"")
+              echo "## ❌ Release Failed" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**Version:** ${VERSION:-N/A}" >> $GITHUB_STEP_SUMMARY
+              echo "**Error:** ${{ steps.release.outputs.error_message || 'Unknown error' }}" >> $GITHUB_STEP_SUMMARY
+              echo "**Logs:** https://github.com/${{ env.REPO }}/actions/runs/${{ github.run_id }}" >> $GITHUB_STEP_SUMMARY
+              ;;
+          esac
           
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
