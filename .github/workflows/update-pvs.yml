@@ -27,9 +27,12 @@ jobs:
           REPO: readonlyuser1/pvs
         id: update
         run: |
-          # Скрипт entrypoint.sh уже выполняется в контейнере
-          echo "status=success" >> $GITHUB_OUTPUT
-          echo "version=7.43.107345" >> $GITHUB_OUTPUT
+            if [ -f "/usr/local/bin/entrypoint.sh" ]; then
+              /usr/local/bin/entrypoint.sh
+            else
+              echo "❌ entrypoint.sh not found in container"
+              exit 1
+            fi
       
       - name: Send Telegram Notification
         if: always()
