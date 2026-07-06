@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   pvs:
     runs-on: ubuntu-latest
@@ -21,16 +24,12 @@ jobs:
         id: get_version
         run: |
           echo "=== Getting latest version from Maven metadata ==="
-          
           VERSIONS=$(curl -s "https://repo1.maven.org/maven2/com/pvsstudio/pvsstudio-maven-plugin/maven-metadata.xml" | \
             xmlstarlet sel -t -v "//version" || \
             grep -oP '(?<=<version>)[^<]+' | sort -V)
-          
           PVS_CORE_VER_LATEST=$(echo "$VERSIONS" | sort -V | tail -1)
           echo "Latest version from Maven: $PVS_CORE_VER_LATEST"
-          
           echo "PVS_CORE_VER_LATEST=$PVS_CORE_VER_LATEST" >> $GITHUB_ENV
-          echo "Latest version: $PVS_CORE_VER_LATEST"
           
       - name: Check and create release
         env:
@@ -62,17 +61,8 @@ jobs:
               echo "Download successful"
               ls -lh "$PVS_CORE_VER_LATEST.zip"
             else
-              echo "WARNING: Could not download zip file from $FILE_URL"
-              echo "Will try to use Maven artifact instead"
-              
-              wget "https://repo1.maven.org/maven2/com/pvsstudio/pvsstudio-maven-plugin/$PVS_CORE_VER_LATEST/pvsstudio-maven-plugin-$PVS_CORE_VER_LATEST.jar"
-              if [ -f "pvsstudio-maven-plugin-$PVS_CORE_VER_LATEST.jar" ]; then
-                echo "Downloaded jar file successfully"
-                mv "pvsstudio-maven-plugin-$PVS_CORE_VER_LATEST.jar" "$PVS_CORE_VER_LATEST.zip"
-              else
-                echo "ERROR: Could not download from any source"
-                exit 1
-              fi
+              echo "ERROR: Could not download file"
+              exit 1
             fi
             
             echo "=== Creating release ==="
