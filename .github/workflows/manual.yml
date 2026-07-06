@@ -76,10 +76,13 @@ jobs:
           log "Current GitHub release: $PVS_CORE_VER_NOW"
           
           
+          echo "version=$PVS_CORE_VER_LATEST" >> $GITHUB_OUTPUT
+          echo "current_version=$PVS_CORE_VER_NOW" >> $GITHUB_OUTPUT
+          
           if [ "$PVS_CORE_VER_NOW" = "$PVS_CORE_VER_LATEST" ]; then
             log "✅ Version $PVS_CORE_VER_LATEST already exists, skipping"
             echo "status=skipped" >> $GITHUB_OUTPUT
-            echo "version=$PVS_CORE_VER_LATEST" >> $GITHUB_OUTPUT
+            echo "skip_reason=Version $PVS_CORE_VER_LATEST already exists" >> $GITHUB_OUTPUT
             exit 0
           fi
           
@@ -169,7 +172,6 @@ jobs:
           RELEASE_URL="https://github.com/$REPO/releases/tag/$PVS_CORE_VER_LATEST"
           
           echo "status=success" >> $GITHUB_OUTPUT
-          echo "version=$PVS_CORE_VER_LATEST" >> $GITHUB_OUTPUT
           echo "release_url=$RELEASE_URL" >> $GITHUB_OUTPUT
           echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
           echo "asset_id=$UPLOAD_ID" >> $GITHUB_OUTPUT
@@ -180,8 +182,9 @@ jobs:
           
           rm -f "$PVS_CORE_VER_LATEST.zip" 2>/dev/null
 
+      
       - name: Send Telegram Notification
-        if: always() && (success() || failure()) && steps.release.outputs.status != 'skipped'
+        if: always()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -194,15 +197,18 @@ jobs:
           echo "📨 Sending Telegram notification..."
           
           STATUS="${{ steps.release.outputs.status }}"
+          VERSION="${{ steps.release.outputs.version }}"
+          CURRENT_VERSION="${{ steps.release.outputs.current_version }}"
           
-          if [ "$STATUS" = "success" ]; then
-            EMOJI="🎉"
-            STATUS_TEXT="✅ SUCCESS"
-            MESSAGE=$(cat <<EOF
-          ${EMOJI} *Новый релиз PVS Studio!*
+          case "$STATUS" in
+            "success")
+              EMOJI="🎉"
+              TITLE="✅ Новый релиз создан!"
+              MESSAGE=$(cat <<EOF
+          ${EMOJI} *${TITLE}*
           
-          *Версия:* \`${{ steps.release.outputs.version }}\`
-          *Статус:* ${STATUS_TEXT}
+          *Версия:* \`${VERSION}\`
+          *Статус:* ✅ УСПЕШНО
           *Размер:* ${{ steps.release.outputs.file_size }}
           *Время:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')
           
@@ -210,22 +216,46 @@ jobs:
           📊 [Workflow логи](https://github.com/${{ env.REPO }}/actions/runs/${{ github.run_id }})
           EOF
           )
-          else
-            EMOJI="💥"
-            STATUS_TEXT="❌ FAILED"
-            MESSAGE=$(cat <<EOF
-          ${EMOJI} *Ошибка создания релиза!*
+              ;;
+              
+            "skipped")
+              EMOJI="ℹ️"
+              TITLE="Релиз уже существует"
+              MESSAGE=$(cat <<EOF
+          ${EMOJI} *${TITLE}*
           
-          *Версия:* \`${{ steps.release.outputs.version || 'N/A' }}\`
-          *Статус:* ${STATUS_TEXT}
-          *Ошибка:* ${{ steps.release.outputs.error_message || 'Неизвестная ошибка' }}
+          *Версия:* \`${VERSION}\`
+          *Статус:* ⏭️ ПРОПУЩЕН
+          *Причина:* Версия уже существует
+          *Текущий релиз:* \`${CURRENT_VERSION}\`
+          *Время:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+          
+          🔗 [Посмотреть релиз](https://github.com/${{ env.REPO }}/releases/tag/${VERSION})
+          📊 [Workflow логи](https://github.com/${{ env.REPO }}/actions/runs/${{ github.run_id }})
+          EOF
+          )
+              ;;
+              
+            "error"|"")
+              EMOJI="💥"
+              TITLE="❌ Ошибка создания релиза!"
+              ERROR_MSG="${{ steps.release.outputs.error_message }}"
+              [ -z "$ERROR_MSG" ] && ERROR_MSG="Неизвестная ошибка (проверьте логи)"
+              
+              MESSAGE=$(cat <<EOF
+          ${EMOJI} *${TITLE}*
+          
+          *Версия:* \`${VERSION:-N/A}\`
+          *Статус:* ❌ ОШИБКА
+          *Ошибка:* ${ERROR_MSG}
           *Время:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')
           
           🔗 [Смотреть логи](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
           ⚠️ *Требуется вмешательство!*
           EOF
           )
-          fi
+              ;;
+          esac
           
           MESSAGE_JSON=$(echo "$MESSAGE" | jq -sR .)
           
@@ -258,23 +288,33 @@ jobs:
         if: always()
         run: |
           STATUS="${{ steps.release.outputs.status }}"
+          VERSION="${{ steps.release.outputs.version }}"
           
-          if [ "$STATUS" = "success" ]; then
-            echo "## ✅ Release Created Successfully" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Version:** ${{ steps.release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-            echo "**Release:** ${{ steps.release.outputs.release_url }}" >> $GITHUB_STEP_SUMMARY
-            echo "**Size:** ${{ steps.release.outputs.file_size }}" >> $GITHUB_STEP_SUMMARY
-          elif [ "$STATUS" = "skipped" ]; then
-            echo "## ⏭️ Release Skipped" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Version ${{ steps.release.outputs.version }} already exists" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "## ❌ Release Failed" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Error:** ${{ steps.release.outputs.error_message || 'Unknown error' }}" >> $GITHUB_STEP_SUMMARY
-            echo "**Logs:** https://github.com/${{ env.REPO }}/actions/runs/${{ github.run_id }}" >> $GITHUB_STEP_SUMMARY
-          fi
+          case "$STATUS" in
+            "success")
+              echo "## ✅ Release Created Successfully" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**Version:** ${VERSION}" >> $GITHUB_STEP_SUMMARY
+              echo "**Release:** ${{ steps.release.outputs.release_url }}" >> $GITHUB_STEP_SUMMARY
+              echo "**Size:** ${{ steps.release.outputs.file_size }}" >> $GITHUB_STEP_SUMMARY
+              ;;
+              
+            "skipped")
+              echo "## ⏭️ Release Skipped" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**Version:** ${VERSION}" >> $GITHUB_STEP_SUMMARY
+              echo "**Reason:** Version already exists" >> $GITHUB_STEP_SUMMARY
+              echo "**Current:** ${{ steps.release.outputs.current_version }}" >> $GITHUB_STEP_SUMMARY
+              ;;
+              
+            "error"|"")
+              echo "## ❌ Release Failed" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**Version:** ${VERSION:-N/A}" >> $GITHUB_STEP_SUMMARY
+              echo "**Error:** ${{ steps.release.outputs.error_message || 'Unknown error' }}" >> $GITHUB_STEP_SUMMARY
+              echo "**Logs:** https://github.com/${{ env.REPO }}/actions/runs/${{ github.run_id }}" >> $GITHUB_STEP_SUMMARY
+              ;;
+          esac
           
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
