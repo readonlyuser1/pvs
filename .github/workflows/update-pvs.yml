@@ -23,7 +23,7 @@ jobs:
       
       - name: Run PVS Studio Updater
         env:
-          GITHUB_TOKEN: ${{ secrets.AAA }}
+          GITHUB_TOKEN: ${{ secrets.PVS_UPDATE_DOCKER_CONTAINER_WRITE_PERSONAL }}
           REPO: readonlyuser1/pvs
         id: update
         run: |
