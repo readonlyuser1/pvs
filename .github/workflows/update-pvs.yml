@@ -20,7 +20,7 @@ jobs:
       - name: Run PVS Studio Updater
         uses: ghcr.io/readonlyuser1/pvs-updater@latest
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.AAA }}
           REPO: readonlyuser1/pvs
         id: update
       
