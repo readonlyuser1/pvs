@@ -45,38 +45,41 @@ jobs:
           STATUS="${{ steps.update.outputs.status }}"
           VERSION="${{ steps.update.outputs.version }}"
           
-          case "$STATUS" in
-            "success")
-              EMOJI="🎉"
-              TITLE="✅ PVS Studio Updated"
-              MESSAGE="${EMOJI} *${TITLE}*\n\n"
-              MESSAGE+="*Version:* \`${VERSION}\`\n"
-              MESSAGE+="*Status:* ✅ SUCCESS\n"
-              MESSAGE+="*Time:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')\n\n"
-              MESSAGE+="🔗 [View Release](https://github.com/readonlyuser1/pvs/releases/tag/${VERSION})"
-              ;;
-              
-            "skipped")
-              EMOJI="ℹ️"
-              TITLE="No New Version"
-              MESSAGE="${EMOJI} *${TITLE}*\n\n"
-              MESSAGE+="*Version:* \`${VERSION}\`\n"
-              MESSAGE+="*Status:* ⏭️ SKIPPED\n"
-              MESSAGE+="*Reason:* Already exists\n"
-              MESSAGE+="*Time:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-              ;;
-              
-            *)
-              EMOJI="💥"
-              TITLE="❌ Update Failed"
-              MESSAGE="${EMOJI} *${TITLE}*\n\n"
-              MESSAGE+="*Version:* \`${VERSION:-N/A}\`\n"
-              MESSAGE+="*Status:* ❌ ERROR\n"
-              MESSAGE+="*Time:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')\n\n"
-              MESSAGE+="🔗 [Check Logs](https://github.com/readonlyuser1/pvs/actions/runs/${{ github.run_id }})"
-              ;;
-          esac
+          # Формируем сообщение в зависимости от статуса
+          if [ "$STATUS" = "success" ]; then
+            EMOJI="🎉"
+            TITLE="✅ PVS Studio Updated"
+            MESSAGE="${EMOJI} *${TITLE}*
+            
+            *Version:* \`${VERSION}\`
+            *Status:* ✅ SUCCESS
+            *Time:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+            
+            🔗 [View Release](https://github.com/readonlyuser1/pvs/releases/tag/${VERSION})"
+            
+          elif [ "$STATUS" = "skipped" ]; then
+            EMOJI="ℹ️"
+            TITLE="No New Version"
+            MESSAGE="${EMOJI} *${TITLE}*
+            
+            *Version:* \`${VERSION}\`
+            *Status:* ⏭️ SKIPPED
+            *Reason:* Already exists
+            *Time:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+            
+          else
+            EMOJI="💥"
+            TITLE="❌ Update Failed"
+            MESSAGE="${EMOJI} *${TITLE}*
+            
+            *Version:* \`${VERSION:-N/A}\`
+            *Status:* ❌ ERROR
+            *Time:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+            
+            🔗 [Check Logs](https://github.com/readonlyuser1/pvs/actions/runs/${{ github.run_id }})"
+          fi
           
+          # Экранирование для JSON
           MESSAGE_JSON=$(echo "$MESSAGE" | jq -sR .)
           
           curl -s -X POST \
