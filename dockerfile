@@ -22,5 +22,7 @@ WORKDIR /workspace
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
+ENV GITHUB_OUTPUT=/dev/stdout
+
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["--help"]
