@@ -50,7 +50,7 @@ fi
 
 # Проверяем текущий релиз
 log "📦 Getting current release from GitHub..."
-CURRENT_RESPONSE=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null || echo '{"tag_name":"null"}')
+CURRENT_RESPONSE=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null || echo '{"tag_name":"null"}')
 CURRENT=$(echo "$CURRENT_RESPONSE" | jq -r '.tag_name')
 
 if [ -z "$CURRENT" ] || [ "$CURRENT" = "null" ]; then
