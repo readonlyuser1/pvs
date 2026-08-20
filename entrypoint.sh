@@ -37,7 +37,11 @@ safe_jq() {
     local default="${3:-}"
     local result
     result=$(echo "$input" | jq -r "$expr" 2>/dev/null) || result="$default"
-    echo "$result"
+    if [ "$result" = "null" ] || [ -z "$result" ]; then
+        echo "$default"
+    else
+        echo "$result"
+    fi
 }
 
 log "📦 Getting latest version from Maven..."
