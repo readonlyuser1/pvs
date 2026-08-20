@@ -3,7 +3,8 @@
 
 set -e
 
-# Проверка переменных
+trap 'echo "❌ Error on line $LINENO: $BASH_COMMAND"; set_output "status" "error"; set_output "error_message" "Error on line $LINENO"; exit 1' ERR
+
 if [ -z "$GITHUB_TOKEN" ]; then
     echo "❌ GITHUB_TOKEN is not set!"
     exit 1
@@ -14,24 +15,43 @@ if [ -z "$REPO" ]; then
 fi
 
 MAVEN_URL="https://repo1.maven.org/maven2/com/pvsstudio/pvsstudio-maven-plugin/maven-metadata.xml"
-DOWNLOAD_BASE="https://files.pvs-studio.com/java/pvsstudio-cores"
+DOWNLOAD_URL="https://files.pvs-studio.com/pvs-studio-java.zip"
 
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1"
 }
 
-# Функция для вывода результатов (работает и в контейнере)
 set_output() {
     local key="$1"
     local value="$2"
-    echo "$key=$value" >> $GITHUB_OUTPUT 2>/dev/null || echo "::set-output name=$key::$value"
+    if [ -n "$GITHUB_OUTPUT" ] && [ -w "$GITHUB_OUTPUT" ]; then
+        echo "$key=$value" >> "$GITHUB_OUTPUT"
+    else
+        echo "::set-output name=$key::$value"
+    fi
 }
 
-# Получаем версию из Maven
+safe_jq() {
+    local expr="$1"
+    local input="$2"
+    local default="${3:-}"
+    local result
+    result=$(echo "$input" | jq -r "$expr" 2>/dev/null) || result="$default"
+    echo "$result"
+}
+
 log "📦 Getting latest version from Maven..."
-VERSIONS=$(curl -s -f "$MAVEN_URL" | grep -oP '(?<=<version>)[^<]+' | sort -V)
+MAVEN_XML=$(curl -s -f --max-time 30 "$MAVEN_URL" 2>/dev/null) || {
+    echo "❌ Failed to fetch Maven metadata (network error)"
+    set_output "status" "error"
+    set_output "error_message" "Failed to fetch Maven metadata"
+    exit 1
+}
+
+VERSIONS=$(echo "$MAVEN_XML" | grep -oP '(?<=<version>)[^<]+' | sort -V)
 if [ -z "$VERSIONS" ]; then
     echo "❌ Failed to get versions from Maven"
+    echo "Response: $MAVEN_XML"
     set_output "status" "error"
     set_output "error_message" "Failed to get versions from Maven"
     exit 1
@@ -40,7 +60,6 @@ fi
 LATEST=$(echo "$VERSIONS" | sort -V | tail -1)
 log "Latest Maven version: $LATEST"
 
-# Проверяем формат версии
 if ! echo "$LATEST" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
     echo "❌ Invalid version format: $LATEST"
     set_output "status" "error"
@@ -48,136 +67,134 @@ if ! echo "$LATEST" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
     exit 1
 fi
 
-# Проверяем текущий релиз
 log "📦 Getting current release from GitHub..."
-CURRENT_RESPONSE=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null || echo '{"tag_name":"null"}')
-CURRENT=$(echo "$CURRENT_RESPONSE" | jq -r '.tag_name')
+CURRENT_RESPONSE=$(curl -s --max-time 30 \
+    -H "Authorization: Bearer $GITHUB_TOKEN" \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null) || CURRENT_RESPONSE='{"tag_name":"null"}'
+
+CURRENT=$(safe_jq '.tag_name' "$CURRENT_RESPONSE" "null")
 
 if [ -z "$CURRENT" ] || [ "$CURRENT" = "null" ]; then
     CURRENT="none"
 fi
 log "Current GitHub release: $CURRENT"
 
-# Сравниваем версии
 if [ "$CURRENT" = "$LATEST" ]; then
     log "✅ Version $LATEST already exists, skipping"
-    echo "status=skipped" >> $GITHUB_OUTPUT 2>/dev/null || echo "::set-output name=status::skipped"
-    echo "version=$LATEST" >> $GITHUB_OUTPUT 2>/dev/null || echo "::set-output name=version::$LATEST"
-    echo "current_version=$CURRENT" >> $GITHUB_OUTPUT 2>/dev/null || echo "::set-output name=current_version::$CURRENT"
-    echo "skip_reason=Version $LATEST already exists" >> $GITHUB_OUTPUT 2>/dev/null || echo "::set-output name=skip_reason::Version $LATEST already exists"
+    set_output "status" "skipped"
+    set_output "version" "$LATEST"
+    set_output "current_version" "$CURRENT"
     exit 0
 fi
 
-# Скачиваем файл
 log "📥 Downloading $LATEST..."
-FILE_URL="$DOWNLOAD_BASE/$LATEST.zip"
 
-if ! curl -s -f -I "$FILE_URL" > /dev/null 2>&1; then
-    echo "❌ File not found: $FILE_URL"
+if ! curl -s -f -I --max-time 15 "$DOWNLOAD_URL" > /dev/null 2>&1; then
+    echo "❌ File not found: $DOWNLOAD_URL"
     set_output "status" "error"
-    set_output "error_message" "File not found: $FILE_URL"
+    set_output "error_message" "File not found: $DOWNLOAD_URL"
     exit 1
 fi
 
-if ! wget -q --timeout=30 --tries=3 "$FILE_URL"; then
-    echo "❌ Failed to download file"
+if ! curl -s -L --max-time 300 --retry 3 -o "${LATEST}.zip" "$DOWNLOAD_URL"; then
+    echo "❌ Failed to download file from $DOWNLOAD_URL"
     set_output "status" "error"
     set_output "error_message" "Failed to download file"
     exit 1
 fi
 
-if [ ! -f "$LATEST.zip" ] || [ ! -s "$LATEST.zip" ]; then
-    echo "❌ Downloaded file is invalid"
+if [ ! -f "${LATEST}.zip" ] || [ ! -s "${LATEST}.zip" ]; then
+    echo "❌ Downloaded file is invalid or empty"
     set_output "status" "error"
     set_output "error_message" "Downloaded file is invalid"
     exit 1
 fi
 
-FILE_SIZE=$(stat -c%s "$LATEST.zip" 2>/dev/null || stat -f%z "$LATEST.zip" 2>/dev/null)
-FILE_SIZE_HUMAN=$(numfmt --to=iec $FILE_SIZE 2>/dev/null || echo "$FILE_SIZE bytes")
+FILE_SIZE=$(stat -c%s "${LATEST}.zip" 2>/dev/null || stat -f%z "${LATEST}.zip" 2>/dev/null)
+FILE_SIZE_HUMAN=$(numfmt --to=iec "$FILE_SIZE" 2>/dev/null || echo "$FILE_SIZE bytes")
 log "File size: $FILE_SIZE_HUMAN"
 
-# Создаем релиз
 log "📤 Creating release..."
+RELEASE_BODY="## Automated Release from Maven Central\n\n- **Version:** $LATEST\n- **Source:** Maven Central\n- **Date:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')\n- **Size:** $FILE_SIZE_HUMAN"
+
 RELEASE_DATA=$(cat <<EOF
 {
     "tag_name": "$LATEST",
     "name": "Release $LATEST",
-    "body": "## Automated Release from Maven Central\n\n- **Version:** $LATEST\n- **Source:** Maven Central\n- **Date:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')\n- **Size:** $FILE_SIZE_HUMAN",
+    "body": "$RELEASE_BODY",
     "draft": false,
     "prerelease": false
 }
 EOF
 )
 
-RESPONSE=$(curl -s -f -X POST \
+RESPONSE=$(curl -s --max-time 30 -X POST \
     -H "Accept: application/vnd.github+json" \
     -H "Authorization: Bearer $GITHUB_TOKEN" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
     "https://api.github.com/repos/$REPO/releases" \
     -d "$RELEASE_DATA") || {
-    echo "❌ Failed to create release"
+    echo "❌ Failed to create release (network error)"
     set_output "status" "error"
     set_output "error_message" "Failed to create release"
     exit 1
 }
 
-if echo "$RESPONSE" | jq -e '.message' > /dev/null 2>&1; then
-    ERROR_MSG=$(echo "$RESPONSE" | jq -r '.message')
+ERROR_MSG=$(safe_jq '.message' "$RESPONSE" "")
+if [ -n "$ERROR_MSG" ]; then
     echo "❌ GitHub API error: $ERROR_MSG"
     set_output "status" "error"
     set_output "error_message" "GitHub API error: $ERROR_MSG"
     exit 1
 fi
 
-RELEASE_ID=$(echo "$RESPONSE" | jq -r '.id')
+RELEASE_ID=$(safe_jq '.id' "$RESPONSE" "")
 if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
-    echo "❌ Failed to get release ID"
+    echo "❌ Failed to get release ID. Response: $RESPONSE"
     set_output "status" "error"
     set_output "error_message" "Failed to get release ID"
     exit 1
 fi
 
-# Загружаем ассет
 log "⬆️ Uploading asset..."
-UPLOAD_RESPONSE=$(curl -s -f -X POST \
+UPLOAD_RESPONSE=$(curl -s --max-time 120 -X POST \
     -H "Accept: application/vnd.github+json" \
     -H "Authorization: Bearer $GITHUB_TOKEN" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
     -H "Content-Type: application/zip" \
     "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=$LATEST.zip" \
-    --data-binary @"$LATEST.zip") || {
-    echo "❌ Failed to upload asset"
+    --data-binary @"${LATEST}.zip") || {
+    echo "❌ Failed to upload asset (network error)"
     set_output "status" "error"
     set_output "error_message" "Failed to upload asset"
     exit 1
 }
 
-if echo "$UPLOAD_RESPONSE" | jq -e '.message' > /dev/null 2>&1; then
-    ERROR_MSG=$(echo "$UPLOAD_RESPONSE" | jq -r '.message')
-    echo "❌ Upload error: $ERROR_MSG"
+UPLOAD_ERROR=$(safe_jq '.message' "$UPLOAD_RESPONSE" "")
+if [ -n "$UPLOAD_ERROR" ]; then
+    echo "❌ Upload error: $UPLOAD_ERROR"
     set_output "status" "error"
-    set_output "error_message" "Upload error: $ERROR_MSG"
+    set_output "error_message" "Upload error: $UPLOAD_ERROR"
     exit 1
 fi
 
-UPLOAD_ID=$(echo "$UPLOAD_RESPONSE" | jq -r '.id')
+UPLOAD_ID=$(safe_jq '.id' "$UPLOAD_RESPONSE" "")
 if [ -z "$UPLOAD_ID" ] || [ "$UPLOAD_ID" = "null" ]; then
-    echo "❌ Failed to get upload ID"
+    echo "❌ Failed to get upload ID. Response: $UPLOAD_RESPONSE"
     set_output "status" "error"
     set_output "error_message" "Failed to get upload ID"
     exit 1
 fi
 
-# Очистка
-rm -f "$LATEST.zip"
+rm -f "${LATEST}.zip"
 
-# Вывод результатов
 RELEASE_URL="https://github.com/$REPO/releases/tag/$LATEST"
 log "✅ Release created successfully!"
 log "🔗 $RELEASE_URL"
 
-echo "status=success" >> $GITHUB_OUTPUT 2>/dev/null || echo "::set-output name=status::success"
-echo "version=$LATEST" >> $GITHUB_OUTPUT 2>/dev/null || echo "::set-output name=version::$LATEST"
-echo "release_url=$RELEASE_URL" >> $GITHUB_OUTPUT 2>/dev/null || echo "::set-output name=release_url::$RELEASE_URL"
-echo "file_size=$FILE_SIZE_HUMAN" >> $GITHUB_OUTPUT 2>/dev/null || echo "::set-output name=file_size::$FILE_SIZE_HUMAN"
+set_output "status" "success"
+set_output "version" "$LATEST"
+set_output "release_url" "$RELEASE_URL"
+set_output "file_size" "$FILE_SIZE_HUMAN"
