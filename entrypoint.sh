@@ -162,7 +162,7 @@ if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
     exit 1
 fi
 
-log "⬆️ Uploading asset..."
+log "⬆️ Uploading asset ($FILE_SIZE bytes)..."
 UPLOAD_RESPONSE=$(curl -s --max-time 120 -X POST \
     -H "Accept: application/vnd.github+json" \
     -H "Authorization: Bearer $GITHUB_TOKEN" \
@@ -176,7 +176,15 @@ UPLOAD_RESPONSE=$(curl -s --max-time 120 -X POST \
     exit 1
 }
 
+log "Upload response (truncated): $(echo "$UPLOAD_RESPONSE" | head -c 500)"
+
 UPLOAD_ERROR=$(safe_jq '.message' "$UPLOAD_RESPONSE" "")
+UPLOAD_ID=$(safe_jq '.id' "$UPLOAD_RESPONSE" "")
+UPLOAD_STATE=$(safe_jq '.state' "$UPLOAD_RESPONSE" "")
+UPLOAD_SIZE=$(safe_jq '.size' "$UPLOAD_RESPONSE" "0")
+
+log "Upload result: id=$UPLOAD_ID state=$UPLOAD_STATE size=$UPLOAD_SIZE error='$UPLOAD_ERROR'"
+
 if [ -n "$UPLOAD_ERROR" ]; then
     echo "❌ Upload error: $UPLOAD_ERROR"
     set_output "status" "error"
@@ -184,12 +192,15 @@ if [ -n "$UPLOAD_ERROR" ]; then
     exit 1
 fi
 
-UPLOAD_ID=$(safe_jq '.id' "$UPLOAD_RESPONSE" "")
 if [ -z "$UPLOAD_ID" ] || [ "$UPLOAD_ID" = "null" ]; then
     echo "❌ Failed to get upload ID. Response: $UPLOAD_RESPONSE"
     set_output "status" "error"
     set_output "error_message" "Failed to get upload ID"
     exit 1
+fi
+
+if [ "$UPLOAD_SIZE" = "0" ] || [ "$UPLOAD_SIZE" = "null" ]; then
+    echo "⚠️ Warning: Upload returned size 0 (may be a GitHub API display issue)"
 fi
 
 rm -f "${LATEST}.zip"
