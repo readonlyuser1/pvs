@@ -108,11 +108,11 @@ jobs:
 
           if (-not $releaseExists) {
             gh release create $env:TAG_VERSION --repo $repo --title "PVS-Studio $env:TAG_VERSION" --generate-notes $files
-            if ($LASTEXITCODE -ne 0) { throw "gh release create вернул $LASTEXITCODE: релиз $env:TAG_VERSION не создан" }
+            if ($LASTEXITCODE -ne 0) { throw "gh release create вернул ${LASTEXITCODE}: релиз $env:TAG_VERSION не создан" }
             Write-Host "Релиз $env:TAG_VERSION создан, ассеты залиты"
           } else {
             $existingAssets = @(gh release view $env:TAG_VERSION --repo $repo --json assets --jq '.assets[].name')
-            if ($LASTEXITCODE -ne 0) { throw "gh release view вернул $LASTEXITCODE: список ассетов не получен" }
+            if ($LASTEXITCODE -ne 0) { throw "gh release view вернул ${LASTEXITCODE}: список ассетов не получен" }
             foreach ($file in $files) {
               $assetName = Split-Path $file -Leaf
               if ($existingAssets -contains $assetName) {
@@ -126,7 +126,7 @@ jobs:
           }
 
           $final = @(gh release view $env:TAG_VERSION --repo $repo --json assets --jq '.assets[].name')
-          if ($LASTEXITCODE -ne 0) { throw "gh release view вернул $LASTEXITCODE: проверить релиз не удалось" }
+          if ($LASTEXITCODE -ne 0) { throw "gh release view вернул ${LASTEXITCODE}: проверить релиз не удалось" }
           if ($final -notcontains $tgz) {
             throw "В релизе $env:TAG_VERSION нет $tgz. Сейчас там: $($final -join ', ')"
           }
