@@ -97,28 +97,37 @@ jobs:
           $tgz = "PVS-Studio-portable-$env:FULL_VERSION.tgz"
           $plugins = Get-ChildItem -Path 'C:\Program Files (x86)\PVS-Studio' -Filter 'sonar-pvs-studio-*.jar'
           if (-not $plugins) {
-            throw 'Не найдено ни одного sonar-pvs-studio-*.jar — релиз без плагинов бесполезен.'
+            throw 'Не найдено ни одного sonar-pvs-studio-*.jar: релиз без плагинов бесполезен.'
           }
           $files = @($tgz, "$tgz.sha256") + $plugins.FullName
 
+          $repo = $env:GITHUB_REPOSITORY
 
-          gh release view $env:TAG_VERSION *> $null
-          if ($LASTEXITCODE -ne 0) {
-            gh release create $env:TAG_VERSION `
-              --title "PVS-Studio $env:TAG_VERSION" `
-              --generate-notes `
-              $files
+          gh release view $env:TAG_VERSION --repo $repo *> $null
+          $releaseExists = ($LASTEXITCODE -eq 0)
+
+          if (-not $releaseExists) {
+            gh release create $env:TAG_VERSION --repo $repo --title "PVS-Studio $env:TAG_VERSION" --generate-notes $files
+            if ($LASTEXITCODE -ne 0) { throw "gh release create вернул $LASTEXITCODE: релиз $env:TAG_VERSION не создан" }
             Write-Host "Релиз $env:TAG_VERSION создан, ассеты залиты"
-            exit 0
+          } else {
+            $existingAssets = @(gh release view $env:TAG_VERSION --repo $repo --json assets --jq '.assets[].name')
+            if ($LASTEXITCODE -ne 0) { throw "gh release view вернул $LASTEXITCODE: список ассетов не получен" }
+            foreach ($file in $files) {
+              $assetName = Split-Path $file -Leaf
+              if ($existingAssets -contains $assetName) {
+                Write-Host "Ассет $assetName уже залит, пропускаю"
+                continue
+              }
+              gh release upload $env:TAG_VERSION $file --repo $repo
+              if ($LASTEXITCODE -ne 0) { throw "gh release upload $assetName вернул $LASTEXITCODE" }
+              Write-Host "Загружен $assetName"
+            }
           }
 
-          $existingAssets = (gh release view $env:TAG_VERSION --json assets --jq '.assets[].name') -split "`n"
-          foreach ($file in $files) {
-            $assetName = Split-Path $file -Leaf
-            if ($existingAssets -contains $assetName) {
-              Write-Host "Ассет $assetName уже залит — пропускаем."
-              continue
-            }
-            gh release upload $env:TAG_VERSION $file
-            Write-Host "Загружен $assetName"
+          $final = @(gh release view $env:TAG_VERSION --repo $repo --json assets --jq '.assets[].name')
+          if ($LASTEXITCODE -ne 0) { throw "gh release view вернул $LASTEXITCODE: проверить релиз не удалось" }
+          if ($final -notcontains $tgz) {
+            throw "В релизе $env:TAG_VERSION нет $tgz. Сейчас там: $($final -join ', ')"
           }
+          Write-Host "Проверено: релиз $env:TAG_VERSION содержит $($final -join ', ')"
