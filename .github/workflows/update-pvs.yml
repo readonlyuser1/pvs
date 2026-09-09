@@ -1,122 +1,314 @@
-name: Update PVS Studio
+name: update-pvs
 
 on:
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '17 3 * * *'
   workflow_dispatch:
+
+concurrency:
+  group: update-pvs
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
+env:
+  VENDOR_JAVA_CORE_BASE_URL: 'https://files.pvs-studio.com/java/pvsstudio-cores'
+  VENDOR_WINDOWS_INSTALLER_URL: 'https://cdn.pvs-studio.com/PVS-Studio_setup.exe'
+  MAVEN_PLUGIN_BASE_URL: 'https://repo1.maven.org/maven2/com/pvsstudio/pvsstudio-maven-plugin'
+  WINDOWS_INSTALL_DIR: 'C:\Program Files (x86)\PVS-Studio'
+  UNWANTED_PLUGIN_JAR_PATTERN: '*old-versions-before-10.2*'
+
 jobs:
-  update-pvs:
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/readonlyuser1/pvs-updater:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    
+  publish-single-release:
+    runs-on: windows-latest
+    timeout-minutes: 40
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      - name: Run PVS Studio Updater
-        env:
-          GITHUB_TOKEN: ${{ secrets.PVS_UPDATE_DOCKER_CONTAINER_WRITE_PERSONAL }}
-          REPO: readonlyuser1/pvs
-        id: update
+      - name: Read published java version and download its analyzer core
+        id: java-package
+        shell: pwsh
         run: |
-            if [ -f "/usr/local/bin/entrypoint.sh" ]; then
-              /usr/local/bin/entrypoint.sh
-            else
-              echo "❌ entrypoint.sh not found in container"
-              exit 1
-            fi
-      
-      - name: Send Telegram Notification
+          $metadataUrl = "$env:MAVEN_PLUGIN_BASE_URL/maven-metadata.xml"
+          $metadata = [xml](Invoke-WebRequest -Uri $metadataUrl -UseBasicParsing -TimeoutSec 30).Content
+          $javaAnalyzerVersion = $metadata.metadata.versioning.release
+          if (-not $javaAnalyzerVersion) { $javaAnalyzerVersion = $metadata.metadata.versioning.latest }
+          if ($javaAnalyzerVersion -notmatch '^\d+\.\d+\.\d+$') {
+            throw "В $metadataUrl версия '$javaAnalyzerVersion' не похожа на три числа через точку — тег релиза и имя ассета получились бы мусорными"
+          }
+          Write-Host "Опубликованная версия java-анализатора: $javaAnalyzerVersion"
+
+          $releaseAssetName = "$javaAnalyzerVersion.zip"
+          $coreUrl = "$env:VENDOR_JAVA_CORE_BASE_URL/$releaseAssetName"
+          $corePath = Join-Path $env:GITHUB_WORKSPACE $releaseAssetName
+          curl.exe -L --retry 3 --retry-delay 5 -o $corePath $coreUrl
+          if (-not (Test-Path $corePath)) {
+            throw "Не скачалось ядро анализатора: $coreUrl"
+          }
+          $downloadedBytes = (Get-Item $corePath).Length
+          if ($downloadedBytes -lt 10MB) {
+            throw "Ядро весит $downloadedBytes байт — вендор отдал не архив, публиковать нельзя ($coreUrl)"
+          }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($corePath)
+          try {
+            $topLevelNames = [string[]]@(
+              $archive.Entries.FullName |
+                ForEach-Object { ($_ -split '/')[0] } |
+                Where-Object { $_ } |
+                Sort-Object -Unique
+            )
+          } finally {
+            $archive.Dispose()
+          }
+          if ($topLevelNames.Count -ne 1 -or $topLevelNames[0] -ne $javaAnalyzerVersion) {
+            throw "Внутри ядра ожидался единственный каталог '$javaAnalyzerVersion', а лежит: $($topLevelNames -join ', '). Kanico распаковывает архив прямо в ~/.config/PVS-Studio-Java, и при другой раскладке maven-плагин ядро не найдёт и потянет своё из интернета."
+          }
+          Write-Host "Ассет $releaseAssetName собран: $([math]::Round($downloadedBytes/1MB)) МБ, внутри каталог $javaAnalyzerVersion"
+          "java_version=$javaAnalyzerVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "java_asset=$releaseAssetName"      | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Check that maven plugin of the same version is published
+        id: maven-check
+        shell: pwsh
+        env:
+          JAVA_VERSION: ${{ steps.java-package.outputs.java_version }}
+        run: |
+          $mavenPluginUrl = "$env:MAVEN_PLUGIN_BASE_URL/$env:JAVA_VERSION/"
+          $mavenPluginPublished = $false
+          try {
+            Invoke-WebRequest -Uri $mavenPluginUrl -Method Head -UseBasicParsing -TimeoutSec 30 | Out-Null
+            $mavenPluginPublished = $true
+          } catch {
+            $mavenPluginPublished = $false
+          }
+          if ($mavenPluginPublished) {
+            Write-Host "pvsstudio-maven-plugin:$env:JAVA_VERSION есть в Maven Central — linux-образ соберётся"
+          } else {
+            Write-Host "::warning::pvsstudio-maven-plugin:$env:JAVA_VERSION в Maven Central ещё нет ($mavenPluginUrl) — java-скан в linux-образе упадёт на разрешении плагина, пока вендор не опубликует артефакт"
+          }
+          "maven_plugin_published=$mavenPluginPublished" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Install windows build and read its full version
+        id: windows-build
+        shell: pwsh
+        run: |
+          $installerPath = Join-Path $env:RUNNER_TEMP 'PVS-Studio_setup.exe'
+          curl.exe -L --retry 3 --retry-delay 5 -o $installerPath $env:VENDOR_WINDOWS_INSTALLER_URL
+          $installer = Start-Process -FilePath $installerPath `
+            -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -PassThru -Wait
+          if ($installer.ExitCode -ne 0) {
+            throw "Установщик PVS-Studio завершился с кодом $($installer.ExitCode)"
+          }
+          $analyzerExePath = Join-Path $env:WINDOWS_INSTALL_DIR 'PVS-Studio_Cmd.exe'
+          if (-not (Test-Path $analyzerExePath)) {
+            throw "После установки нет $analyzerExePath"
+          }
+          $windowsFullVersion = (Get-Item $analyzerExePath).VersionInfo.ProductVersion
+          if ($windowsFullVersion -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+            throw "ProductVersion '$windowsFullVersion' не похож на версию сборки (ожидается четыре числа через точку) — имя ассета получилось бы мусорным"
+          }
+          Write-Host "Версия windows-сборки: $windowsFullVersion"
+          "windows_version=$windowsFullVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Pack portable archive with checksum
+        id: portable
+        shell: pwsh
+        env:
+          WINDOWS_VERSION: ${{ steps.windows-build.outputs.windows_version }}
+        run: |
+          $portableArchiveName = "PVS-Studio-portable-$env:WINDOWS_VERSION.tgz"
+          $installRoot = Split-Path $env:WINDOWS_INSTALL_DIR -Parent
+          $installLeaf = Split-Path $env:WINDOWS_INSTALL_DIR -Leaf
+          tar -czf $portableArchiveName -C $installRoot $installLeaf
+          if ($LASTEXITCODE -ne 0) { throw "tar завершился с кодом $LASTEXITCODE" }
+          $archiveEntries = tar -tzf $portableArchiveName
+          if (-not ($archiveEntries | Select-String -Pattern '^PVS-Studio/PVS-Studio_Cmd\.exe$')) {
+            throw "В архиве $portableArchiveName нет PVS-Studio/PVS-Studio_Cmd.exe — win-образ такой архив не примет"
+          }
+          $checksum = (Get-FileHash -Path $portableArchiveName -Algorithm SHA256).Hash
+          "$checksum  $portableArchiveName" | Out-File -FilePath "$portableArchiveName.sha256" -Encoding ascii
+          Write-Host "Собран $portableArchiveName ($([math]::Round((Get-Item $portableArchiveName).Length/1MB)) МБ) и его sha256"
+          "portable_asset=$portableArchiveName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Collect sonarqube plugin jars
+        id: plugins
+        shell: pwsh
+        run: |
+          $allPluginJars = Get-ChildItem -Path $env:WINDOWS_INSTALL_DIR -Filter 'sonar-pvs-studio-*.jar'
+          if (-not $allPluginJars) {
+            throw "В поставке нет ни одного sonar-pvs-studio-*.jar — серверу SonarQube нечем обновляться"
+          }
+          $publishablePluginJars = $allPluginJars | Where-Object { $_.Name -notlike $env:UNWANTED_PLUGIN_JAR_PATTERN }
+          $skippedPluginJars = $allPluginJars | Where-Object { $_.Name -like $env:UNWANTED_PLUGIN_JAR_PATTERN }
+          foreach ($skipped in $skippedPluginJars) {
+            Write-Host "Не публикую $($skipped.Name)"
+          }
+          if (-not $publishablePluginJars) {
+            throw "После отсева остались только неподдерживаемые jar — публиковать нечего"
+          }
+          foreach ($jar in $publishablePluginJars) {
+            Copy-Item -Path $jar.FullName -Destination $env:GITHUB_WORKSPACE -Force
+            Write-Host "К публикации: $($jar.Name)"
+          }
+          ($publishablePluginJars.Name -join "`n") | Out-File -FilePath 'publishable-plugins.txt' -Encoding ascii
+
+      - name: Publish every file into one release
+        id: release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.java-package.outputs.java_version }}
+          JAVA_ASSET: ${{ steps.java-package.outputs.java_asset }}
+          PORTABLE_ASSET: ${{ steps.portable.outputs.portable_asset }}
+        run: |
+          $repository = $env:GITHUB_REPOSITORY
+          $pluginAssetNames = Get-Content 'publishable-plugins.txt' | Where-Object { $_ }
+          $wantedAssetNames = @($env:JAVA_ASSET, $env:PORTABLE_ASSET, "$env:PORTABLE_ASSET.sha256") + $pluginAssetNames
+
+          gh release view $env:RELEASE_TAG --repo $repository *> $null
+          $releaseAlreadyExists = ($LASTEXITCODE -eq 0)
+          if (-not $releaseAlreadyExists) {
+            gh release create $env:RELEASE_TAG --repo $repository --title "PVS-Studio $env:RELEASE_TAG" --notes "Единый релиз поставки PVS-Studio $env:RELEASE_TAG: java-анализатор, portable-сборка для windows-образа и плагины SonarQube."
+            if ($LASTEXITCODE -ne 0) { throw "gh release create вернул ${LASTEXITCODE}: релиз $env:RELEASE_TAG не создан" }
+            Write-Host "Создан релиз $env:RELEASE_TAG"
+          }
+
+          $presentAssetNames = @(gh release view $env:RELEASE_TAG --repo $repository --json assets --jq '.assets[].name')
+          if ($LASTEXITCODE -ne 0) { throw "gh release view вернул ${LASTEXITCODE}: список ассетов не получен" }
+
+          $obsoleteAssetNames = $presentAssetNames | Where-Object {
+            $_ -and ($wantedAssetNames -notcontains $_) -and
+            ($_ -like 'PVS-Studio-portable-*' -or $_ -like 'sonar-pvs-studio-*.jar' -or $_ -like '*.zip')
+          }
+          foreach ($obsolete in $obsoleteAssetNames) {
+            gh release delete-asset $env:RELEASE_TAG $obsolete --repo $repository --yes
+            if ($LASTEXITCODE -ne 0) { throw "gh release delete-asset $obsolete вернул $LASTEXITCODE" }
+            Write-Host "Удалён устаревший ассет $obsolete"
+          }
+
+          $uploadedAssetNames = @()
+          foreach ($assetName in $wantedAssetNames) {
+            if ($presentAssetNames -contains $assetName -and $obsoleteAssetNames -notcontains $assetName) {
+              Write-Host "Уже в релизе: $assetName"
+              continue
+            }
+            gh release upload $env:RELEASE_TAG $assetName --repo $repository --clobber
+            if ($LASTEXITCODE -ne 0) { throw "gh release upload $assetName вернул $LASTEXITCODE" }
+            $uploadedAssetNames += $assetName
+            Write-Host "Загружен $assetName"
+          }
+
+          $finalAssetNames = @(gh release view $env:RELEASE_TAG --repo $repository --json assets --jq '.assets[].name')
+          if ($LASTEXITCODE -ne 0) { throw "gh release view вернул ${LASTEXITCODE}: проверить релиз не удалось" }
+          $missingAssetNames = $wantedAssetNames | Where-Object { $finalAssetNames -notcontains $_ }
+          if ($missingAssetNames) {
+            throw "В релизе $env:RELEASE_TAG не хватает: $($missingAssetNames -join ', '). Сейчас там: $($finalAssetNames -join ', ')"
+          }
+          $unwantedInRelease = $finalAssetNames | Where-Object { $_ -like $env:UNWANTED_PLUGIN_JAR_PATTERN }
+          if ($unwantedInRelease) {
+            throw "В релизе остался ненужный jar: $($unwantedInRelease -join ', ')"
+          }
+          Write-Host "Релиз $env:RELEASE_TAG содержит: $($finalAssetNames -join ', ')"
+          "uploaded=$($uploadedAssetNames -join ', ')" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "final=$($finalAssetNames -join ', ')"       | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Keep only three newest releases
+        id: retention
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.java-package.outputs.java_version }}
+          RELEASES_TO_KEEP: '3'
+        run: |
+          $repository = $env:GITHUB_REPOSITORY
+          $keepCount = [int]$env:RELEASES_TO_KEEP
+          $publishedTags = @(gh release list --repo $repository --limit 200 --json tagName --jq '.[].tagName')
+          if ($LASTEXITCODE -ne 0) { throw "gh release list вернул ${LASTEXITCODE}: список релизов не получен" }
+
+          $sortableReleases = @()
+          $unsortableTags = @()
+          foreach ($tag in $publishedTags) {
+            $parsedVersion = $null
+            if ([version]::TryParse($tag, [ref]$parsedVersion)) {
+              $sortableReleases += [pscustomobject]@{ Tag = $tag; Version = $parsedVersion }
+            } else {
+              $unsortableTags += $tag
+            }
+          }
+          foreach ($tag in $unsortableTags) {
+            Write-Host "Тег $tag не разбирается как версия — не трогаю его"
+          }
+
+          $tagsToKeep = @($sortableReleases | Sort-Object Version -Descending | Select-Object -First $keepCount | ForEach-Object { $_.Tag })
+          if ($env:RELEASE_TAG -and $tagsToKeep -notcontains $env:RELEASE_TAG) {
+            $tagsToKeep += $env:RELEASE_TAG
+          }
+          $tagsToDelete = @($sortableReleases | Where-Object { $tagsToKeep -notcontains $_.Tag } | Sort-Object Version -Descending | ForEach-Object { $_.Tag })
+
+          Write-Host "Оставляю: $($tagsToKeep -join ', ')"
+          foreach ($tag in $tagsToDelete) {
+            gh release delete $tag --repo $repository --cleanup-tag --yes
+            if ($LASTEXITCODE -ne 0) { throw "gh release delete $tag вернул $LASTEXITCODE" }
+            Write-Host "Удалён релиз $tag вместе с тегом"
+          }
+          if (-not $tagsToDelete) {
+            Write-Host "Лишних релизов нет, удалять нечего"
+          }
+          "kept=$($tagsToKeep -join ', ')"      | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "deleted=$($tagsToDelete -join ', ')" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Notify telegram
         if: always()
+        shell: pwsh
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          JOB_RESULT: ${{ job.status }}
+          RELEASE_TAG: ${{ steps.java-package.outputs.java_version }}
+          WINDOWS_VERSION: ${{ steps.windows-build.outputs.windows_version }}
+          MAVEN_PLUGIN_PUBLISHED: ${{ steps.maven-check.outputs.maven_plugin_published }}
+          UPLOADED_ASSETS: ${{ steps.release.outputs.uploaded }}
+          FINAL_ASSETS: ${{ steps.release.outputs.final }}
+          KEPT_RELEASES: ${{ steps.retention.outputs.kept }}
+          DELETED_RELEASES: ${{ steps.retention.outputs.deleted }}
         run: |
-          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
-            echo "⚠️ Telegram credentials not configured"
+          if (-not $env:TELEGRAM_BOT_TOKEN -or -not $env:TELEGRAM_CHAT_ID) {
+            Write-Host "::warning::Секреты TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID не заданы — уведомление не отправлено"
             exit 0
-          fi
-          
-          STATUS="${{ steps.update.outputs.status }}"
-          VERSION="${{ steps.update.outputs.version }}"
-          
-          if [ "$STATUS" = "success" ]; then
-            EMOJI="🎉"
-            TITLE="✅ PVS Studio Updated"
-            MESSAGE="${EMOJI} *${TITLE}*
-            
-            *Version:* \`${VERSION}\`
-            *Status:* ✅ SUCCESS
-            *Time:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')
-            
-            🔗 [View Release](https://github.com/readonlyuser1/pvs/releases/tag/${VERSION})"
-            
-          elif [ "$STATUS" = "skipped" ]; then
-            EMOJI="ℹ️"
-            TITLE="No New Version"
-            MESSAGE="${EMOJI} *${TITLE}*
-            
-            *Version:* \`${VERSION}\`
-            *Status:* ⏭️ SKIPPED
-            *Reason:* Already exists
-            *Time:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-            
-          else
-            EMOJI="💥"
-            TITLE="❌ Update Failed"
-            MESSAGE="${EMOJI} *${TITLE}*
-            
-            *Version:* \`${VERSION:-N/A}\`
-            *Status:* ❌ ERROR
-            *Time:* $(date -u +'%Y-%m-%d %H:%M:%S UTC')
-            
-            🔗 [Check Logs](https://github.com/readonlyuser1/pvs/actions/runs/${{ github.run_id }})"
-          fi
-          
-          MESSAGE_JSON=$(echo "$MESSAGE" | jq -sR .)
-          
-          curl -s -X POST \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"chat_id\": \"${TELEGRAM_CHAT_ID}\",
-              \"text\": ${MESSAGE_JSON},
-              \"parse_mode\": \"Markdown\",
-              \"disable_web_page_preview\": true
-            }" > /dev/null 2>&1 || true
-      
-      - name: Summary
-        if: always()
-        run: |
-          STATUS="${{ steps.update.outputs.status }}"
-          VERSION="${{ steps.update.outputs.version }}"
-          
-          echo "## 📦 PVS Studio Update" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          case "$STATUS" in
-            "success")
-              echo "**Status:** ✅ Success" >> $GITHUB_STEP_SUMMARY
-              echo "**Version:** ${VERSION}" >> $GITHUB_STEP_SUMMARY
-              echo "**Release:** https://github.com/readonlyuser1/pvs/releases/tag/${VERSION}" >> $GITHUB_STEP_SUMMARY
-              ;;
-            "skipped")
-              echo "**Status:** ⏭️ Skipped" >> $GITHUB_STEP_SUMMARY
-              echo "**Version:** ${VERSION} (already exists)" >> $GITHUB_STEP_SUMMARY
-              ;;
-            *)
-              echo "**Status:** ❌ Failed" >> $GITHUB_STEP_SUMMARY
-              echo "**Version:** ${VERSION:-N/A}" >> $GITHUB_STEP_SUMMARY
-              ;;
-          esac
-          
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Time:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          }
+          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          $messageLines = New-Object System.Collections.Generic.List[string]
+          if ($env:JOB_RESULT -eq 'success') {
+            if ($env:UPLOADED_ASSETS) {
+              $messageLines.Add("PVS-Studio: релиз $env:RELEASE_TAG обновлён")
+              $messageLines.Add("Добавлено: $env:UPLOADED_ASSETS")
+            } else {
+              $messageLines.Add("PVS-Studio: релиз $env:RELEASE_TAG уже полный, менять нечего")
+            }
+          } else {
+            $messageLines.Add("PVS-Studio: обновление НЕ удалось ($env:JOB_RESULT)")
+          }
+          if ($env:RELEASE_TAG)      { $messageLines.Add("Версия java-анализатора: $env:RELEASE_TAG") }
+          if ($env:WINDOWS_VERSION)  { $messageLines.Add("Версия windows-сборки: $env:WINDOWS_VERSION") }
+          if ($env:MAVEN_PLUGIN_PUBLISHED -eq 'False') {
+            $messageLines.Add("Внимание: pvsstudio-maven-plugin этой версии в Maven Central ещё нет — java-скан в linux-образе будет падать")
+          }
+          if ($env:FINAL_ASSETS)     { $messageLines.Add("Файлы релиза: $env:FINAL_ASSETS") }
+          if ($env:KEPT_RELEASES)    { $messageLines.Add("Оставлены релизы: $env:KEPT_RELEASES") }
+          if ($env:DELETED_RELEASES) { $messageLines.Add("Удалены старые релизы: $env:DELETED_RELEASES") }
+          if ($env:RELEASE_TAG)      { $messageLines.Add("Релиз: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/releases/tag/$env:RELEASE_TAG") }
+          $messageLines.Add("Прогон: $runUrl")
+          $requestBody = @{
+            chat_id                  = $env:TELEGRAM_CHAT_ID
+            text                     = ($messageLines -join "`n")
+            disable_web_page_preview = $true
+          } | ConvertTo-Json -Compress
+          $telegramResponse = Invoke-RestMethod -Method Post -TimeoutSec 30 `
+            -Uri "https://api.telegram.org/bot$env:TELEGRAM_BOT_TOKEN/sendMessage" `
+            -ContentType 'application/json; charset=utf-8' `
+            -Body ([System.Text.Encoding]::UTF8.GetBytes($requestBody))
+          if (-not $telegramResponse.ok) {
+            throw "Telegram не принял сообщение: $($telegramResponse | ConvertTo-Json -Compress)"
+          }
+          Write-Host "Уведомление отправлено в чат $env:TELEGRAM_CHAT_ID"
