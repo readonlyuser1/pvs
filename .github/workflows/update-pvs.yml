@@ -1,5 +1,4 @@
 name: update-pvs
-
 on:
   schedule:
     - cron: '17 3 * * *'
@@ -198,7 +197,6 @@ jobs:
             $uploadedAssetNames += $assetName
             Write-Host "Загружен $assetName"
           }
-
           $finalAssetNames = @(gh release view $env:RELEASE_TAG --repo $repository --json assets --jq '.assets[].name')
           if ($LASTEXITCODE -ne 0) { throw "gh release view вернул ${LASTEXITCODE}: проверить релиз не удалось" }
           $missingAssetNames = $wantedAssetNames | Where-Object { $finalAssetNames -notcontains $_ }
@@ -269,46 +267,193 @@ jobs:
           WINDOWS_VERSION: ${{ steps.windows-build.outputs.windows_version }}
           MAVEN_PLUGIN_PUBLISHED: ${{ steps.maven-check.outputs.maven_plugin_published }}
           UPLOADED_ASSETS: ${{ steps.release.outputs.uploaded }}
-          FINAL_ASSETS: ${{ steps.release.outputs.final }}
           KEPT_RELEASES: ${{ steps.retention.outputs.kept }}
           DELETED_RELEASES: ${{ steps.retention.outputs.deleted }}
+          JAVA_ASSET: ${{ steps.java-package.outputs.java_asset }}
+          PORTABLE_ASSET: ${{ steps.portable.outputs.portable_asset }}
+          JAVA_STEP_OUTCOME: ${{ steps.java-package.outcome }}
+          MAVEN_STEP_OUTCOME: ${{ steps.maven-check.outcome }}
+          WINDOWS_STEP_OUTCOME: ${{ steps.windows-build.outcome }}
+          PORTABLE_STEP_OUTCOME: ${{ steps.portable.outcome }}
+          PLUGINS_STEP_OUTCOME: ${{ steps.plugins.outcome }}
+          RELEASE_STEP_OUTCOME: ${{ steps.release.outcome }}
+          RETENTION_STEP_OUTCOME: ${{ steps.retention.outcome }}
+          GITHUB_SHA_SHORT: ${{ github.sha }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
         run: |
           if (-not $env:TELEGRAM_BOT_TOKEN -or -not $env:TELEGRAM_CHAT_ID) {
-            Write-Host "::warning::Секреты TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID не заданы — уведомление не отправлено"
+            Write-Host "::warning::TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID не заданы — уведомление не отправлено"
             exit 0
           }
-          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
-          $messageLines = New-Object System.Collections.Generic.List[string]
+
+          $repo   = $env:GITHUB_REPOSITORY
+          $server = $env:GITHUB_SERVER_URL
+          $runId  = $env:GITHUB_RUN_ID
+          $runUrl = "$server/$repo/actions/runs/$runId"
+
+          $relUrl = ''
+          if ($env:RELEASE_TAG) { $relUrl = "$server/$repo/releases/tag/$env:RELEASE_TAG" }
+
+          function H([string]$s) {
+            if ($null -eq $s) { return '' }
+            return $s.Replace('&','&amp;').Replace('<','&lt;').Replace('>','&gt;')
+          }
+          function Size([long]$b) {
+            if ($b -ge 1GB) { return ('{0:N1} ГБ' -f ($b/1GB)) }
+            if ($b -ge 1MB) { return ('{0:N0} МБ' -f ($b/1MB)) }
+            if ($b -ge 1KB) { return ('{0:N0} КБ' -f ($b/1KB)) }
+            return "${b} Б"
+          }
+          function StepIcon([string]$o) {
+            if ($o -eq 'success')   { return '✅' }
+            if ($o -eq 'failure')   { return '❌' }
+            if ($o -eq 'cancelled') { return '🚫' }
+            if ($o -eq 'skipped')   { return '⏭️' }
+            return '❔'
+          }
+
+          $headerIcon = '⚠️'
+          if ($env:JOB_RESULT -eq 'success')   { $headerIcon = '✅' }
+          if ($env:JOB_RESULT -eq 'failure')   { $headerIcon = '❌' }
+          if ($env:JOB_RESULT -eq 'cancelled') { $headerIcon = '🚫' }
+
+          $title = 'PVS-Studio update-pvs'
+          if ($env:RELEASE_TAG) { $title = "PVS-Studio $env:RELEASE_TAG" }
+
+          $subtitle = "статус: $env:JOB_RESULT ❔"
           if ($env:JOB_RESULT -eq 'success') {
-            if ($env:UPLOADED_ASSETS) {
-              $messageLines.Add("PVS-Studio: релиз $env:RELEASE_TAG обновлён")
-              $messageLines.Add("Добавлено: $env:UPLOADED_ASSETS")
-            } else {
-              $messageLines.Add("PVS-Studio: релиз $env:RELEASE_TAG уже полный, менять нечего")
-            }
-          } else {
-            $messageLines.Add("PVS-Studio: обновление НЕ удалось ($env:JOB_RESULT)")
+            if ($env:UPLOADED_ASSETS) { $subtitle = 'релиз обновлён 🆕' }
+            else                      { $subtitle = 'уже полный, менять нечего 👌' }
           }
-          if ($env:RELEASE_TAG)      { $messageLines.Add("Версия java-анализатора: $env:RELEASE_TAG") }
-          if ($env:WINDOWS_VERSION)  { $messageLines.Add("Версия windows-сборки: $env:WINDOWS_VERSION") }
+          if ($env:JOB_RESULT -eq 'failure')   { $subtitle = 'обновление НЕ удалось 💥' }
+          if ($env:JOB_RESULT -eq 'cancelled') { $subtitle = 'обновление отменено 🚫' }
+
+          $lines = New-Object System.Collections.Generic.List[string]
+          $lines.Add("$headerIcon <b>$title</b> — $subtitle")
+          $lines.Add('')
+
+          $verParts = @()
+          if ($env:RELEASE_TAG)     { $verParts += "📦 Java <code>$(H $env:RELEASE_TAG)</code>" }
+          if ($env:WINDOWS_VERSION) { $verParts += "🪟 Windows <code>$(H $env:WINDOWS_VERSION)</code>" }
+          if ($verParts.Count -gt 0) {
+            $lines.Add(($verParts -join ' · '))
+          }
+
+          if ($env:MAVEN_PLUGIN_PUBLISHED -eq 'True') {
+            $lines.Add('✅ Maven Central: плагин опубликован')
+          }
           if ($env:MAVEN_PLUGIN_PUBLISHED -eq 'False') {
-            $messageLines.Add("Внимание: pvsstudio-maven-plugin этой версии в Maven Central ещё нет — java-скан в linux-образе будет падать")
+            $lines.Add('⚠️ Maven Central: плагина этой версии ещё нет — java-скан в linux упадёт')
           }
-          if ($env:FINAL_ASSETS)     { $messageLines.Add("Файлы релиза: $env:FINAL_ASSETS") }
-          if ($env:KEPT_RELEASES)    { $messageLines.Add("Оставлены релизы: $env:KEPT_RELEASES") }
-          if ($env:DELETED_RELEASES) { $messageLines.Add("Удалены старые релизы: $env:DELETED_RELEASES") }
-          if ($env:RELEASE_TAG)      { $messageLines.Add("Релиз: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/releases/tag/$env:RELEASE_TAG") }
-          $messageLines.Add("Прогон: $runUrl")
-          $requestBody = @{
+          $lines.Add('')
+
+          $stepNames = @('Java-ядро','Maven','Win-установка','Portable','Плагины','Релиз','Retention')
+          $stepOutcomes = @(
+            $env:JAVA_STEP_OUTCOME,
+            $env:MAVEN_STEP_OUTCOME,
+            $env:WINDOWS_STEP_OUTCOME,
+            $env:PORTABLE_STEP_OUTCOME,
+            $env:PLUGINS_STEP_OUTCOME,
+            $env:RELEASE_STEP_OUTCOME,
+            $env:RETENTION_STEP_OUTCOME
+          )
+          $icons = @()
+          foreach ($o in $stepOutcomes) { $icons += StepIcon $o }
+          $lines.Add("🔧 <b>Шаги:</b> $($icons -join ' ')")
+
+          if ($env:JOB_RESULT -ne 'success') {
+            for ($i = 0; $i -lt $stepOutcomes.Count; $i++) {
+              if ($stepOutcomes[$i] -eq 'failure') {
+                $lines.Add("💥 Сбой на шаге: <b>$($stepNames[$i])</b>")
+                break
+              }
+            }
+          }
+          $lines.Add('')
+
+          $workspace  = $env:GITHUB_WORKSPACE
+          $assetFiles = @()
+          if ($env:JAVA_ASSET)     { $assetFiles += $env:JAVA_ASSET }
+          if ($env:PORTABLE_ASSET) {
+            $assetFiles += $env:PORTABLE_ASSET
+            $assetFiles += "$env:PORTABLE_ASSET.sha256"
+          }
+          $pluginsTxt = Join-Path $workspace 'publishable-plugins.txt'
+          if (Test-Path $pluginsTxt) {
+            Get-Content $pluginsTxt | Where-Object { $_ } | ForEach-Object { $assetFiles += $_ }
+          }
+
+          $totalBytes = 0L
+          $assetLines = @()
+          foreach ($a in $assetFiles) {
+            $p = Join-Path $workspace $a
+            if (Test-Path $p) {
+              $sz = (Get-Item $p).Length
+              $totalBytes += $sz
+              $assetLines += "📄 <code>$(H $a)</code> — $(Size $sz)"
+            } else {
+              $assetLines += "📄 <code>$(H $a)</code> — <i>нет локально</i>"
+            }
+          }
+          if ($assetLines.Count -gt 0) {
+            $lines.Add("📁 <b>Ассеты ($($assetLines.Count), $(Size $totalBytes)):</b>")
+            foreach ($al in $assetLines) { $lines.Add($al) }
+            $lines.Add('')
+          }
+
+          $keptCount = 0
+          $delCount  = 0
+          if ($env:KEPT_RELEASES)    { $keptCount = @($env:KEPT_RELEASES    -split ',' | Where-Object { $_ }).Count }
+          if ($env:DELETED_RELEASES) { $delCount  = @($env:DELETED_RELEASES -split ',' | Where-Object { $_ }).Count }
+          if ($keptCount -gt 0 -or $delCount -gt 0) {
+            if ($delCount -gt 0) {
+              $lines.Add("🗑️ Оставлено <b>$keptCount</b> релизов · удалено <b>$delCount</b>")
+            } else {
+              $lines.Add("🗑️ Оставлено <b>$keptCount</b> релизов · лишних нет 👌")
+            }
+            $lines.Add('')
+          }
+
+          $sha = ''
+          if ($env:GITHUB_SHA_SHORT) {
+            $sha = $env:GITHUB_SHA_SHORT.Substring(0, [Math]::Min(7, $env:GITHUB_SHA_SHORT.Length))
+          }
+          $triggerEmoji = '⚡'
+          if ($env:GITHUB_EVENT_NAME -eq 'schedule')          { $triggerEmoji = '⏰' }
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') { $triggerEmoji = '👆' }
+          if ($env:GITHUB_EVENT_NAME -eq 'push')              { $triggerEmoji = '⬆️' }
+          if ($env:GITHUB_EVENT_NAME -eq 'pull_request')      { $triggerEmoji = '🔀' }
+
+          $triggerLine = "$triggerEmoji <b>$env:GITHUB_EVENT_NAME</b>"
+          if ($env:GITHUB_TRIGGERING_ACTOR) { $triggerLine += " by <code>$(H $env:GITHUB_TRIGGERING_ACTOR)</code>" }
+          if ($env:GITHUB_REF_NAME)         { $triggerLine += " · <code>$(H $env:GITHUB_REF_NAME)</code>" }
+          if ($sha)                         { $triggerLine += "@<code>$sha</code>" }
+          $triggerLine += " · #$env:GITHUB_RUN_NUMBER"
+          $lines.Add($triggerLine)
+
+          $links = @("🔗 <a href='$runUrl'>Прогон</a>")
+          if ($relUrl) { $links += "· <a href='$relUrl'>Релиз</a>" }
+          $lines.Add(($links -join ' '))
+
+          $text = $lines -join "`n"
+          if ($text.Length -gt 4000) { $text = $text.Substring(0, 3996) + '…' }
+
+          $body = @{
             chat_id                  = $env:TELEGRAM_CHAT_ID
-            text                     = ($messageLines -join "`n")
+            text                     = $text
+            parse_mode               = 'HTML'
             disable_web_page_preview = $true
           } | ConvertTo-Json -Compress
-          $telegramResponse = Invoke-RestMethod -Method Post -TimeoutSec 30 `
+
+          $resp = Invoke-RestMethod -Method Post -TimeoutSec 30 `
             -Uri "https://api.telegram.org/bot$env:TELEGRAM_BOT_TOKEN/sendMessage" `
             -ContentType 'application/json; charset=utf-8' `
-            -Body ([System.Text.Encoding]::UTF8.GetBytes($requestBody))
-          if (-not $telegramResponse.ok) {
-            throw "Telegram не принял сообщение: $($telegramResponse | ConvertTo-Json -Compress)"
+            -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
+
+          if (-not $resp.ok) {
+            throw "Telegram не принял сообщение: $($resp | ConvertTo-Json -Compress)"
           }
-          Write-Host "Уведомление отправлено в чат $env:TELEGRAM_CHAT_ID"
+          Write-Host "Уведомление отправлено в чат $env:TELEGRAM_CHAT_ID ($($text.Length) символов)"
