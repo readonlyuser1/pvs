@@ -297,7 +297,7 @@ jobs:
           $relUrl = ''
           if ($env:RELEASE_TAG) { $relUrl = "$server/$repo/releases/tag/$env:RELEASE_TAG" }
 
-          function H([string]$s) {
+          function Esc([string]$s) {
             if ($null -eq $s) { return '' }
             return $s.Replace('&','&amp;').Replace('<','&lt;').Replace('>','&gt;')
           }
@@ -336,8 +336,8 @@ jobs:
           $lines.Add('')
 
           $verParts = @()
-          if ($env:RELEASE_TAG)     { $verParts += "📦 Java <code>$(H $env:RELEASE_TAG)</code>" }
-          if ($env:WINDOWS_VERSION) { $verParts += "🪟 Windows <code>$(H $env:WINDOWS_VERSION)</code>" }
+          if ($env:RELEASE_TAG)     { $verParts += "📦 Java <code>$(Esc $env:RELEASE_TAG)</code>" }
+          if ($env:WINDOWS_VERSION) { $verParts += "🪟 Windows <code>$(Esc $env:WINDOWS_VERSION)</code>" }
           if ($verParts.Count -gt 0) {
             $lines.Add(($verParts -join ' · '))
           }
@@ -393,9 +393,9 @@ jobs:
             if (Test-Path $p) {
               $sz = (Get-Item $p).Length
               $totalBytes += $sz
-              $assetLines += "📄 <code>$(H $a)</code> — $(Size $sz)"
+              $assetLines += "📄 <code>$(Esc $a)</code> — $(Size $sz)"
             } else {
-              $assetLines += "📄 <code>$(H $a)</code> — <i>нет локально</i>"
+              $assetLines += "📄 <code>$(Esc $a)</code> — <i>нет локально</i>"
             }
           }
           if ($assetLines.Count -gt 0) {
@@ -428,8 +428,8 @@ jobs:
           if ($env:GITHUB_EVENT_NAME -eq 'pull_request')      { $triggerEmoji = '🔀' }
 
           $triggerLine = "$triggerEmoji <b>$env:GITHUB_EVENT_NAME</b>"
-          if ($env:GITHUB_TRIGGERING_ACTOR) { $triggerLine += " by <code>$(H $env:GITHUB_TRIGGERING_ACTOR)</code>" }
-          if ($env:GITHUB_REF_NAME)         { $triggerLine += " · <code>$(H $env:GITHUB_REF_NAME)</code>" }
+          if ($env:GITHUB_TRIGGERING_ACTOR) { $triggerLine += " by <code>$(Esc $env:GITHUB_TRIGGERING_ACTOR)</code>" }
+          if ($env:GITHUB_REF_NAME)         { $triggerLine += " · <code>$(Esc $env:GITHUB_REF_NAME)</code>" }
           if ($sha)                         { $triggerLine += "@<code>$sha</code>" }
           $triggerLine += " · #$env:GITHUB_RUN_NUMBER"
           $lines.Add($triggerLine)
